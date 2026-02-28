@@ -1,0 +1,55 @@
+# Streamlit UI
+
+## Run
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Environment:
+- `GOOGLE_API_KEY` is required.
+- Optional: `agent_config.yaml` with model cards (see `agent_config.example.yaml`).
+
+## Views
+
+The app provides two tabs:
+- `User View`: chat-first interface for normal end-user interaction.
+- `Debug View`: state/step introspection (history, prompt, runtime, memory, telemetry, diffs).
+
+## User View Behavior
+
+- Send prompts via chat input.
+- If the agent triggers `verify_with_user`, the UI shows an interrupt card and blocks new prompts until you answer.
+- Submitting the interrupt response resumes graph execution with `Command(resume=answer)`.
+- Tool messages can be toggled on/off in the chat display.
+
+## Debug View Behavior
+
+- Shows run metrics (history count, prompt count, steps, turn index).
+- Step slider to inspect snapshots captured during graph streaming.
+- Tabs:
+  - `History`
+  - `Prompt`
+  - `Runtime`
+  - `Memory`
+  - `Telemetry`
+  - `Diff`
+
+## Session Controls
+
+- Sidebar `Reset Session` button clears in-memory run state and starts a fresh thread.
+
+## Model Configuration
+
+- Sidebar lets you choose a `Model card`, then optionally override:
+  - `Model name override`
+  - `Thinking budget override`
+- Cards are loaded from `agent_config.yaml` if present; otherwise built-in defaults are used.
+
+## Tool Controls
+
+- Sidebar shows an `Available Tools` section with per-tool toggles.
+- Enabled tools are bound to the agent for the current run.
+- `search_web` is included in the default tool catalog.
+- If all tools are disabled, runtime initialization is blocked until at least one is enabled.

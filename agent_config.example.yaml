@@ -1,0 +1,44 @@
+default_model_card: gemini_flash_fast
+
+model_cards:
+  - id: gemini_flash_fast
+    provider: google_genai
+    model_name: models/gemini-3-flash-preview
+    temperature: 0.0
+    thinking_budget: 0
+    max_output_tokens: 2048
+    model_kwargs: {}
+
+  - id: gemini_flash_reasoning
+    provider: google_genai
+    model_name: models/gemini-3-flash-preview
+    temperature: 0.0
+    thinking_budget: 1024
+    max_output_tokens: 4096
+    model_kwargs:
+      top_p: 0.95
+
+search:
+  providers:
+    - name: tavily
+      enabled: true
+      api_key_env: TAVILY_API_KEY
+      timeout_s: 8.0
+      weight: 1.0
+    - name: brave
+      enabled: true
+      api_key_env: BRAVE_API_KEY
+      timeout_s: 8.0
+      weight: 1.0
+  budgets:
+    max_providers_per_call: 2
+    max_results_per_provider: 8
+    max_total_results_before_rerank: 40
+    max_enriched_results: 3
+    global_timeout_s: 12.0
+  defaults:
+    default_top_k: 8
+    default_recency_days: 30
+    default_mode: balanced
+    default_enrich: false
+    provider_priority: [tavily, brave]
