@@ -15,6 +15,66 @@ from .models import SkillMeta
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 
 
+def find_project_root(start: Path = Path.cwd()) -> Path:
+    """
+    Resolve project root by walking up until `.git` is found.
+    If not found, return the provided start directory.
+    """
+    cur = start.resolve()
+    if cur.is_file():
+        cur = cur.parent
+    while True:
+        if (cur / ".git").exists():
+            return cur
+        if cur.parent == cur:
+            return start.resolve() if start.exists() else cur
+        cur = cur.parent
+
+
+def _skill_files_under_root(root: Path) -> List[Path]:
+    """
+    Collect SKILL.md files recursively under a root directory.
+    """
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [root] if root.name == "SKILL.md" else []
+    return sorted([p for p in root.rglob("SKILL.md") if p.is_file()])
+
+
+def _discover_skill_files(search_root: Path) -> List[Path]:
+    """
+    Discover SKILL.md files with project-root awareness.
+
+    Behavior:
+    - Scan search_root recursively when it exists.
+    - Also scan all `.skills` directories recursively from project root.
+    """
+    # If caller passes an explicit non-.skills directory, respect that scope.
+    if search_root.exists() and search_root.name != ".skills":
+        return _skill_files_under_root(search_root)
+
+    project_root = find_project_root(Path.cwd())
+    out: List[Path] = []
+
+    if search_root.exists():
+        out.extend(_skill_files_under_root(search_root))
+
+    for p in sorted(project_root.rglob(".skills")):
+        if p.is_dir():
+            out.extend(_skill_files_under_root(p))
+    # Deduplicate while preserving deterministic order.
+    seen = set()
+    deduped: List[Path] = []
+    for p in sorted(out):
+        k = p.resolve().as_posix()
+        if k in seen:
+            continue
+        seen.add(k)
+        deduped.append(p)
+    return deduped
+
+
 def parse_skill_md(text: str, path: Path) -> SkillMeta:
     """Parse a SKILL.md file with YAML frontmatter."""
     m = _FRONTMATTER_RE.match(text)
@@ -29,22 +89,26 @@ def parse_skill_md(text: str, path: Path) -> SkillMeta:
     return SkillMeta(name=name, description=desc, path=path, meta=meta, body=body.strip())
 
 
-def discover_skills(skills_root: Path = Path(".skills")) -> List[SkillMeta]:
-    """Scan <skills_root>/<dir>/SKILL.md files and return a list of SkillMeta."""
-    skills: List[SkillMeta] = []
-    if not skills_root.exists():
-        return skills
+def discover_skills(skills_root: Path = Path(".skills"), *, include_body: bool = False) -> List[SkillMeta]:
+    """
+    Discover SKILL.md files recursively and return SkillMeta records.
 
-    for d in sorted(skills_root.iterdir()):
-        if not d.is_dir():
+    - If `skills_root` exists, it is scanned recursively.
+    - If `skills_root` does not exist, fallback scans `.skills` directories
+      recursively from project root.
+    """
+    skills: List[SkillMeta] = []
+    for skill_file in _discover_skill_files(skills_root):
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+            sk = parse_skill_md(text, skill_file)
+        except Exception:
+            # Skip invalid SKILL.md files outside the skill contract.
             continue
-        skill_file = d / "SKILL.md"
-        if not skill_file.exists():
-            continue
-        text = skill_file.read_text(encoding="utf-8")
-        sk = parse_skill_md(text, skill_file)
-        sk.body = None  # registry only; body loaded on-demand via load_skill tool
+        if not include_body:
+            sk.body = None  # registry only; body loaded on-demand via load_skill tool
         skills.append(sk)
+    skills.sort(key=lambda s: s.path.as_posix())
     return skills
 
 

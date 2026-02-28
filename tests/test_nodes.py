@@ -145,6 +145,28 @@ class TestNodes(TestCase):
         state = {"history": [ToolMessage(content="not-json", tool_call_id="tc")], "runtime": {}}
         self.assertEqual(activate_skill_from_tool_result_node(state), {})
 
+    def test_activate_skill_from_tool_result_node_handles_block_content(self):
+        payload = {
+            "name": "deep-research",
+            "description": "desc",
+            "body": "Skill body",
+            "meta": {"owner": "team"},
+        }
+        state = {
+            "history": [
+                ToolMessage(
+                    content=[{"type": "text", "text": json.dumps(payload)}],
+                    tool_call_id="tc",
+                )
+            ],
+            "runtime": {"run_id": "r"},
+        }
+
+        out = activate_skill_from_tool_result_node(state)
+        rt = out["runtime"]
+        self.assertEqual(rt["active_skill_name"], "deep-research")
+        self.assertEqual(rt["active_skill_body"], "Skill body")
+
     def test_activate_subagent_from_tool_result_node_merges_runtime(self):
         payload = {
             "__tool": "spawn_subagents",
@@ -164,3 +186,4 @@ class TestNodes(TestCase):
         self.assertEqual(rt["last_subagent_request_id"], "subreq_1")
         self.assertEqual(len(rt["subagent_runs"]), 1)
         self.assertIn("t1", rt["subagent_results"])
+        self.assertIn("t2", rt["subagent_errors"])

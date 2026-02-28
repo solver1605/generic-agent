@@ -17,7 +17,7 @@ from .utils import compact_tool_message, msg_tokens
 # Signal detection
 # ---------------------------------------------------------------------------
 
-def detect_signals(state: Dict[str, Any]) -> ContextSignals:
+def detect_signals(state: Dict[str, Any], budget: Optional[BudgetPolicy] = None) -> ContextSignals:
     hist: List[BaseMessage] = state.get("history", [])
     runtime = state.get("runtime", {}) or {}
 
@@ -27,7 +27,8 @@ def detect_signals(state: Dict[str, Any]) -> ContextSignals:
 
     user_msg = next((m for m in reversed(hist) if isinstance(m, HumanMessage)), None)
     user_text = (user_msg.content if user_msg else "") or ""
-    needs_planning = runtime.get("force_planning", False) or (len(user_text) > 280)
+    planning_trigger = int((budget or BudgetPolicy()).planning_trigger_chars)
+    needs_planning = runtime.get("force_planning", False) or (len(user_text) > planning_trigger)
 
     user_asked_cap = any(k in user_text.lower() for k in [
         "what can you do", "capabilities", "skills", "tools available"
@@ -77,7 +78,7 @@ class ContextManager:
         hist: List[BaseMessage] = state.get("history", [])
         memory = state.get("memory", {}) or {}
         skills: List[SkillMeta] = state.get("skills", []) or []
-        sig = detect_signals(state)
+        sig = detect_signals(state, self.budget)
 
         # 1) Prompt cards (system stack)
         cards = self._select_cards(sig)
@@ -88,10 +89,15 @@ class ContextManager:
 
         # 3) Skills registry gating (Top-K)
         skills_msg: List[SystemMessage] = []
-        if self._should_inject_skills(sig) and skills:
+        if self._should_inject_skills(state, sig) and skills:
             user_msg = next((m for m in reversed(hist) if isinstance(m, HumanMessage)), None)
             user_text = (user_msg.content if user_msg else "") or ""
-            skills_text = render_skills_topk(skills, user_text, self.budget.max_skills_chars, k=12)
+            skills_text = render_skills_topk(
+                skills,
+                user_text,
+                self.budget.max_skills_chars,
+                k=max(1, int(self.budget.max_skills_top_k)),
+            )
             skills_msg = [SystemMessage(content=skills_text)]
 
         # 4) Memory
@@ -130,8 +136,14 @@ class ContextManager:
             tags.add("planning")
         return self.prompt_lib.select(lambda c: len(c.tags & tags) > 0)
 
-    def _should_inject_skills(self, sig: ContextSignals) -> bool:
-        return sig.is_first_turn or sig.user_asked_capabilities or sig.needs_planning or sig.has_error
+    def _should_inject_skills(self, state: Dict[str, Any], sig: ContextSignals) -> bool:
+        runtime = state.get("runtime", {}) or {}
+        # Keep skills visible until one is actively loaded, so short follow-up turns
+        # can still discover and invoke skills like deep-research.
+        active_loaded = bool(runtime.get("active_skill_name") and runtime.get("active_skill_body"))
+        if not active_loaded:
+            return True
+        return sig.user_asked_capabilities or sig.needs_planning or sig.has_error
 
     def _curate_history(
         self, hist: List[BaseMessage], sig: ContextSignals
@@ -147,7 +159,10 @@ class ContextManager:
         return out
 
     def _fit_to_budget(self, msgs: List[BaseMessage]) -> List[BaseMessage]:
-        max_in = max(1000, self.budget.max_prompt_tokens - self.budget.reserved_for_generation)
+        max_in = max(
+            int(self.budget.min_input_tokens),
+            int(self.budget.max_prompt_tokens) - int(self.budget.reserved_for_generation),
+        )
 
         system = [m for m in msgs if isinstance(m, SystemMessage)]
         others = [m for m in msgs if not isinstance(m, SystemMessage)]
@@ -161,7 +176,7 @@ class ContextManager:
             running = 0
             for sm in kept_system:
                 c = sm.content or ""
-                allow_chars = max(200, (max_in - running) * 4)
+                allow_chars = max(int(self.budget.min_system_message_chars), (max_in - running) * 4)
                 truncated.append(SystemMessage(
                     content=c[:allow_chars] + ("\n...[truncated]..." if len(c) > allow_chars else "")
                 ))

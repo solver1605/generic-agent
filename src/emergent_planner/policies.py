@@ -14,6 +14,10 @@ class BudgetPolicy:
     reserved_for_generation: int = 2_000
     max_tool_snippet_chars: int = 1_200
     max_skills_chars: int = 2_500
+    max_skills_top_k: int = 12
+    planning_trigger_chars: int = 280
+    min_input_tokens: int = 1_000
+    min_system_message_chars: int = 200
 
 
 @dataclass

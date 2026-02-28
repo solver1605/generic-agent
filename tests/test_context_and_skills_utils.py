@@ -4,7 +4,7 @@ from unittest import TestCase
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from src.emergent_planner.context_manager import ContextManager
+from src.emergent_planner.context_manager import ContextManager, detect_signals
 from src.emergent_planner.models import PromptCard, PromptLibrary
 from src.emergent_planner.policies import BudgetPolicy
 from src.emergent_planner.skills import discover_skills, parse_skill_md, render_skills_topk
@@ -104,6 +104,36 @@ Body.
         self.assertIn("Available skills (load only when needed):", joined)
         self.assertIn("API Debugger", joined)
 
+    def test_context_manager_keeps_skills_registry_visible_until_active_skill_loaded(self):
+        lib = PromptLibrary(cards=[PromptCard("core", "CORE", {"core"}, priority=0)])
+        budget = BudgetPolicy(max_prompt_tokens=4000, reserved_for_generation=1000, max_skills_chars=400)
+        cm = ContextManager(prompt_lib=lib, budget=budget)
+
+        skills = [
+            parse_skill_md(
+                """---
+name: deep-research
+description: Conduct deep research reports.
+---
+Body.
+""",
+                Path("/tmp/deep-research/SKILL.md"),
+            ),
+        ]
+        for s in skills:
+            s.body = None
+
+        state = {
+            "history": [HumanMessage(content="please do a deep research on EV policy")],
+            "memory": {},
+            "runtime": {"turn_index": 4, "after_tool": False},
+            "skills": skills,
+        }
+        msgs = cm.compose(state)
+        joined = "\n".join(getattr(m, "content", "") for m in msgs if isinstance(m, SystemMessage))
+        self.assertIn("Available skills (load only when needed):", joined)
+        self.assertIn("deep-research", joined)
+
     def test_parse_skill_md_requires_frontmatter_fields(self):
         bad = "---\nname: X\n---\nBody"
         with self.assertRaises(ValueError):
@@ -168,3 +198,11 @@ Body
         self.assertIsInstance(compacted, ToolMessage)
         self.assertIn("...[truncated]...", compacted.content)
         self.assertEqual(compacted.tool_call_id, "tc")
+
+    def test_detect_signals_respects_configured_planning_trigger(self):
+        text = "x" * 240
+        state = {"history": [HumanMessage(content=text)], "runtime": {"turn_index": 1}}
+        sig_loose = detect_signals(state, BudgetPolicy(planning_trigger_chars=300))
+        sig_tight = detect_signals(state, BudgetPolicy(planning_trigger_chars=200))
+        self.assertFalse(sig_loose.needs_planning)
+        self.assertTrue(sig_tight.needs_planning)

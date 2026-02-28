@@ -11,7 +11,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
-from ..config import AgentConfig, ModelCard, default_agent_config, load_agent_config
+from ..config import (
+    AgentConfig,
+    ModelCard,
+    default_agent_config,
+    load_agent_config,
+    resolve_runtime_policies,
+)
 from ..tool_registry import select_tools, tool_name
 from .artifacts import persist_task_artifact
 from .policy import resolve_worker_tool_names
@@ -31,14 +37,18 @@ def _resolve_execution(
     execution: SubAgentExecutionConfig,
 ) -> SubAgentExecutionConfig:
     scfg = getattr(cfg, "subagents", default_agent_config().subagents)
-    max_workers = int(parent_runtime.get("subagent_max_workers", execution.max_workers))
-    max_wall = float(parent_runtime.get("subagent_max_wall_time_s", execution.max_wall_time_s))
+    max_workers = int(parent_runtime.get("subagent_max_workers", execution.max_workers or scfg.max_workers_default))
+    max_worker_turns = int(
+        parent_runtime.get("subagent_max_worker_turns", execution.max_worker_turns or scfg.max_worker_turns_default)
+    )
+    max_wall = float(parent_runtime.get("subagent_max_wall_time_s", execution.max_wall_time_s or scfg.max_wall_time_s_default))
+    max_retries = int(execution.max_retries if execution.max_retries is not None else scfg.max_retries_default)
 
     return SubAgentExecutionConfig(
-        max_workers=max(1, min(max_workers, scfg.max_workers_default)),
-        max_worker_turns=max(1, min(int(execution.max_worker_turns), scfg.max_worker_turns_default)),
-        max_wall_time_s=max(5.0, min(max_wall, scfg.max_wall_time_s_default)),
-        max_retries=max(0, min(int(execution.max_retries), scfg.max_retries_default)),
+        max_workers=max(1, min(max_workers, scfg.max_workers_limit)),
+        max_worker_turns=max(1, min(max_worker_turns, scfg.max_worker_turns_limit)),
+        max_wall_time_s=max(1.0, min(max_wall, scfg.max_wall_time_s_limit)),
+        max_retries=max(0, min(max_retries, scfg.max_retries_limit)),
     )
 
 
@@ -115,6 +125,10 @@ def run_subagents(
 
     resolved_exec = _resolve_execution(cfg, parent_runtime, execution)
     model_card = _resolve_model_card(cfg, parent_runtime)
+    budget_policy, tool_log_policy, summary_policy, resolved_profile_id = resolve_runtime_policies(
+        cfg,
+        str(parent_runtime.get("policy_profile_id", "")).strip() or None,
+    )
     google_api_key = os.environ.get("GOOGLE_API_KEY", "")
 
     all_tools_list = list(all_tools)
@@ -171,6 +185,9 @@ def run_subagents(
                 task_index=idx,
                 model_card=model_card,
                 worker_tools=tool_objs,
+                budget_policy=budget_policy,
+                tool_log_policy=tool_log_policy,
+                summary_policy=summary_policy,
                 max_worker_turns=resolved_exec.max_worker_turns,
                 max_wall_time_s=max(1.0, deadline - now),
                 google_api_key=google_api_key,
@@ -181,11 +198,13 @@ def run_subagents(
                     task_id=task.id,
                     title=task.title,
                     status="ok",
+                    task_prompt=getattr(succ, "task_prompt", ""),
                     output=succ.output,
                     summary=succ.summary,
                     worker_run_id=succ.worker_run_id,
                     attempts=attempts,
                     turns_used=succ.turns_used,
+                    turn_traces=list(getattr(succ, "turn_traces", []) or []),
                     tool_names=names,
                     timings_ms=succ.timings_ms,
                 )
@@ -197,6 +216,8 @@ def run_subagents(
 
             err = fail.error
             err.attempts = attempts
+            err.task_prompt = str(getattr(fail, "task_prompt", "") or "")
+            err.turn_traces = list(getattr(fail, "turn_traces", []) or [])
             if err.retryable and attempts <= resolved_exec.max_retries:
                 continue
             return idx, None, err
@@ -218,16 +239,18 @@ def run_subagents(
         max_workers = max(1, min(resolved_exec.max_workers, len(parallel_items)))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_run_with_retries, idx, task, names) for idx, task, names in parallel_items]
+            processed = set()
             remaining = max(0.1, deadline - time.perf_counter())
             try:
                 for fut in as_completed(futures, timeout=remaining):
+                    processed.add(fut)
                     i, result, err = fut.result()
                     if result is not None:
                         indexed_results.append((i, result))
                     if err is not None:
                         errors.append(err)
             except TimeoutError:
-                completed = {f for f in futures if f.done()}
+                completed = {f for f in futures if f.done() and f not in processed}
                 done_indices = set()
                 for f in completed:
                     i, result, err = f.result()
@@ -236,6 +259,13 @@ def run_subagents(
                         indexed_results.append((i, result))
                     if err is not None:
                         errors.append(err)
+                for f in processed:
+                    try:
+                        i, _, _ = f.result()
+                        done_indices.add(i)
+                    except Exception:
+                        # Ignore here; this path only marks already-processed futures.
+                        pass
                 for f in futures:
                     if not f.done():
                         f.cancel()
@@ -262,6 +292,8 @@ def run_subagents(
             "output": r.output,
             "attempts": r.attempts,
             "turns_used": r.turns_used,
+            "task_prompt": r.task_prompt,
+            "turn_traces": r.turn_traces,
             "tool_names": r.tool_names,
             "timings_ms": r.timings_ms,
         }
@@ -281,6 +313,8 @@ def run_subagents(
             "message": e.message,
             "retryable": e.retryable,
             "attempts": e.attempts,
+            "task_prompt": e.task_prompt,
+            "turn_traces": e.turn_traces,
         }
         persist_task_artifact(
             artifact_root=scfg.artifact_dir,
@@ -296,13 +330,16 @@ def run_subagents(
     elif errors and not results:
         status = "failed"
 
+    unique_failed_task_ids = sorted({str(e.task_id) for e in errors})
     stats = {
         "tasks_requested": len(tasks),
         "tasks_scheduled": len(scheduled),
         "tasks_completed": len(results),
-        "tasks_failed": len(errors),
+        "tasks_failed": len(unique_failed_task_ids),
+        "error_entries": len(errors),
         "max_workers_used": min(resolved_exec.max_workers, len(parallel_items)) if parallel_items else 1,
         "elapsed_ms": int((time.perf_counter() - start) * 1000),
+        "policy_profile_id": resolved_profile_id,
     }
 
     summary = _build_summary(results, errors)

@@ -30,9 +30,20 @@ from langgraph.types import interrupt
 
 from .models import VerifyRequest
 from .search.engine import SearchRequest, run_search
-from .skills import parse_skill_md
+from .skills import discover_skills
 from .subagents.orchestrator import run_subagents
 from .subagents.types import SubAgentExecutionConfig, SubAgentTask
+
+
+def _normalize_skill_key(name: str) -> str:
+    """
+    Normalize skill identifiers so aliases like deep_research, deep-research,
+    and "Deep Research" resolve to the same key.
+    """
+    raw = (name or "").strip().lower()
+    if not raw:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
 
 
 # ---------------------------------------------------------------------------
@@ -319,42 +330,35 @@ def spawn_subagents(
 @tool
 def load_skill(skill_name: str) -> str:
     """
-    Load a skill by name from .skills/<dir>/SKILL.md (or by matching frontmatter name)
+    Load a skill by name from discovered SKILL.md files under project skills roots
+    (supports recursive discovery).
     and return JSON: {name, description, body, meta}.
     """
-    skills_root = Path(".skills")
+    needle = _normalize_skill_key(skill_name)
+    if not needle:
+        raise ValueError("skill_name cannot be empty")
 
-    # 1) direct directory match
-    candidate = skills_root / skill_name / "SKILL.md"
-    if candidate.exists():
-        text = candidate.read_text(encoding="utf-8")
-        sk = parse_skill_md(text, candidate)
-        return json.dumps({
-            "name": sk.name,
-            "description": sk.description,
-            "body": sk.body,
-            "meta": sk.meta,
-        })
+    skills = discover_skills(Path(".skills"), include_body=True)
+    aliases = {needle}
+    aliases.add(needle.replace("-", "_"))
+    aliases.add(needle.replace("_", "-"))
 
-    # 2) scan and match by frontmatter name
-    if skills_root.exists():
-        for d in skills_root.iterdir():
-            if not d.is_dir():
-                continue
-            f = d / "SKILL.md"
-            if not f.exists():
-                continue
-            text = f.read_text(encoding="utf-8")
-            sk = parse_skill_md(text, f)
-            if sk.name.lower() == skill_name.lower():
-                return json.dumps({
-                    "name": sk.name,
-                    "description": sk.description,
-                    "body": sk.body,
-                    "meta": sk.meta,
-                })
+    for sk in skills:
+        candidates = {
+            _normalize_skill_key(sk.name),
+            _normalize_skill_key(sk.path.parent.name),
+        }
+        if candidates & aliases:
+            return json.dumps({
+                "name": sk.name,
+                "description": sk.description,
+                "body": sk.body,
+                "meta": sk.meta,
+            })
 
-    raise FileNotFoundError(f"Skill not found: {skill_name}")
+    available = sorted({sk.name for sk in skills})
+    suffix = f" Available: {', '.join(available)}" if available else " No skills discovered."
+    raise FileNotFoundError(f"Skill not found: {skill_name}.{suffix}")
 
 
 @tool

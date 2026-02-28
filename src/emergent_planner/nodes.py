@@ -128,6 +128,36 @@ def summarize_node(
 # Skill activation
 # ---------------------------------------------------------------------------
 
+def _parse_tool_json_payload(m: ToolMessage) -> Optional[Dict[str, Any]]:
+    """
+    Parse tool payloads robustly across provider/tool content shapes.
+    """
+    raw = normalize_content(getattr(m, "content", None)).strip()
+    if not raw:
+        return None
+
+    candidates = [raw]
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
+            inner = "\n".join(lines[1:-1]).strip()
+            if inner:
+                candidates.append(inner)
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(raw[first:last + 1].strip())
+
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def activate_skill_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     If the most recent ToolMessage contains a load_skill JSON payload, inject the
@@ -140,10 +170,8 @@ def activate_skill_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, Any
     for m in reversed(hist):
         if not isinstance(m, ToolMessage):
             continue
-        txt = m.content or ""
-        try:
-            payload = json.loads(txt)
-        except Exception:
+        payload = _parse_tool_json_payload(m)
+        if payload is None:
             continue
 
         if isinstance(payload, dict) and payload.get("body") and payload.get("name"):
@@ -174,10 +202,8 @@ def activate_subagent_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, 
     for m in reversed(hist):
         if not isinstance(m, ToolMessage):
             continue
-        txt = m.content or ""
-        try:
-            obj = json.loads(txt)
-        except Exception:
+        obj = _parse_tool_json_payload(m)
+        if obj is None:
             continue
         if isinstance(obj, dict) and obj.get("__tool") == "spawn_subagents":
             payload = obj
@@ -208,9 +234,14 @@ def activate_subagent_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, 
     for r in payload.get("results", []) or []:
         if isinstance(r, dict) and r.get("task_id"):
             results_map[str(r["task_id"])] = r
+    errors_map = dict(runtime.get("subagent_errors", {}) or {})
+    for e in payload.get("errors", []) or []:
+        if isinstance(e, dict) and e.get("task_id"):
+            errors_map[str(e["task_id"])] = e
 
     runtime["subagent_runs"] = runs
     runtime["subagent_results"] = results_map
+    runtime["subagent_errors"] = errors_map
     runtime["subagent_stats"] = payload.get("stats", {})
     runtime["last_subagent_request_id"] = request_id
     return {"runtime": runtime}

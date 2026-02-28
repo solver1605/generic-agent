@@ -33,6 +33,8 @@ class SubAgentError:
     message: str
     retryable: bool = False
     attempts: int = 1
+    task_prompt: str = ""
+    turn_traces: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -43,11 +45,13 @@ class SubAgentResult:
     task_id: str
     title: str
     status: str
+    task_prompt: str
     output: str
     summary: str
     worker_run_id: str
     attempts: int
     turns_used: int
+    turn_traces: List[Dict[str, Any]] = field(default_factory=list)
     tool_names: List[str] = field(default_factory=list)
     artifact_path: Optional[str] = None
     timings_ms: Dict[str, int] = field(default_factory=dict)

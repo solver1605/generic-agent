@@ -1,4 +1,5 @@
 default_model_card: gemini_flash_fast
+default_policy_profile: balanced
 
 model_cards:
   - id: gemini_flash_fast
@@ -17,6 +18,61 @@ model_cards:
     max_output_tokens: 4096
     model_kwargs:
       top_p: 0.95
+
+policy_profiles:
+  - id: compact
+    description: Tighter prompt budget for faster lightweight runs.
+    budget:
+      max_prompt_tokens: 10000
+      reserved_for_generation: 2200
+      max_tool_snippet_chars: 700
+      max_skills_chars: 1200
+      max_skills_top_k: 6
+      planning_trigger_chars: 220
+      min_input_tokens: 1200
+      min_system_message_chars: 180
+    summary:
+      summarize_when_history_len_exceeds: 30
+      keep_last_n_messages: 12
+    tool_log:
+      artifacts_dir: artifacts/tool_logs
+      max_inline_chars: 900
+
+  - id: balanced
+    description: Default profile for most interactions.
+    budget:
+      max_prompt_tokens: 16000
+      reserved_for_generation: 2000
+      max_tool_snippet_chars: 1200
+      max_skills_chars: 2500
+      max_skills_top_k: 12
+      planning_trigger_chars: 280
+      min_input_tokens: 1000
+      min_system_message_chars: 200
+    summary:
+      summarize_when_history_len_exceeds: 50
+      keep_last_n_messages: 18
+    tool_log:
+      artifacts_dir: artifacts/tool_logs
+      max_inline_chars: 1200
+
+  - id: deep_research
+    description: Large prompt budget for synthesis-heavy deep research.
+    budget:
+      max_prompt_tokens: 24000
+      reserved_for_generation: 3000
+      max_tool_snippet_chars: 2200
+      max_skills_chars: 4000
+      max_skills_top_k: 20
+      planning_trigger_chars: 180
+      min_input_tokens: 1400
+      min_system_message_chars: 220
+    summary:
+      summarize_when_history_len_exceeds: 70
+      keep_last_n_messages: 24
+    tool_log:
+      artifacts_dir: artifacts/tool_logs
+      max_inline_chars: 2000
 
 search:
   providers:
@@ -46,9 +102,13 @@ search:
 subagents:
   enabled: true
   max_workers_default: 4
+  max_workers_limit: 16
   max_worker_turns_default: 8
+  max_worker_turns_limit: 64
   max_wall_time_s_default: 45.0
+  max_wall_time_s_limit: 600.0
   max_retries_default: 1
+  max_retries_limit: 6
   artifact_dir: artifacts/subagents
   tool_policy:
     allow_by_task_type:

@@ -8,6 +8,7 @@ from src.emergent_planner.config import (
     build_llm_from_model_card,
     default_agent_config,
     load_agent_config,
+    resolve_runtime_policies,
 )
 
 
@@ -128,6 +129,14 @@ model_cards:
         self.assertGreaterEqual(cfg.subagents.max_workers_default, 1)
         self.assertIn("spawn_subagents", cfg.subagents.tool_policy.denylist)
 
+    def test_default_config_contains_policy_profiles(self):
+        cfg = default_agent_config()
+        ids = [p.id for p in cfg.policy_profiles]
+        self.assertIn("compact", ids)
+        self.assertIn("balanced", ids)
+        self.assertIn("deep_research", ids)
+        self.assertEqual(cfg.default_policy_profile, "balanced")
+
     def test_load_agent_config_parses_subagent_section(self):
         p = Path("/tmp/test_agent_config_sub.yaml")
         p.write_text(
@@ -140,9 +149,13 @@ model_cards:
 subagents:
   enabled: true
   max_workers_default: 3
+  max_workers_limit: 12
   max_worker_turns_default: 6
+  max_worker_turns_limit: 20
   max_wall_time_s_default: 30
+  max_wall_time_s_limit: 180
   max_retries_default: 2
+  max_retries_limit: 5
   artifact_dir: artifacts/custom_subagents
   tool_policy:
     allow_by_task_type:
@@ -155,12 +168,67 @@ subagents:
         try:
             cfg = load_agent_config(p)
             self.assertEqual(cfg.subagents.max_workers_default, 3)
+            self.assertEqual(cfg.subagents.max_workers_limit, 12)
             self.assertEqual(cfg.subagents.max_worker_turns_default, 6)
+            self.assertEqual(cfg.subagents.max_worker_turns_limit, 20)
             self.assertEqual(cfg.subagents.max_wall_time_s_default, 30)
+            self.assertEqual(cfg.subagents.max_wall_time_s_limit, 180)
             self.assertEqual(cfg.subagents.max_retries_default, 2)
+            self.assertEqual(cfg.subagents.max_retries_limit, 5)
             self.assertEqual(str(cfg.subagents.artifact_dir), "artifacts/custom_subagents")
             self.assertEqual(cfg.subagents.tool_policy.allow_by_task_type["default"], ["read_file", "search_web"])
             self.assertIn("write_file", cfg.subagents.tool_policy.denylist)
+        finally:
+            if p.exists():
+                p.unlink()
+
+    def test_load_agent_config_parses_policy_profiles(self):
+        p = Path("/tmp/test_agent_config_policy.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+default_policy_profile: deep_research
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+policy_profiles:
+  - id: balanced
+    description: custom balanced
+    budget:
+      max_prompt_tokens: 12345
+      reserved_for_generation: 2345
+      max_tool_snippet_chars: 345
+      max_skills_chars: 678
+      max_skills_top_k: 7
+      planning_trigger_chars: 111
+      min_input_tokens: 888
+      min_system_message_chars: 99
+    summary:
+      summarize_when_history_len_exceeds: 22
+      keep_last_n_messages: 9
+    tool_log:
+      artifacts_dir: artifacts/custom_tool_logs
+      max_inline_chars: 444
+  - id: deep_research
+    description: research profile
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.default_policy_profile, "deep_research")
+            balanced = cfg.get_policy_profile("balanced")
+            self.assertEqual(balanced.description, "custom balanced")
+            self.assertEqual(balanced.budget.max_prompt_tokens, 12345)
+            self.assertEqual(balanced.budget.max_skills_top_k, 7)
+            self.assertEqual(balanced.summary.keep_last_n_messages, 9)
+            self.assertEqual(str(balanced.tool_log.artifacts_dir), "artifacts/custom_tool_logs")
+            budget, tool_log, summary, resolved_id = resolve_runtime_policies(cfg, "balanced")
+            self.assertEqual(resolved_id, "balanced")
+            self.assertEqual(budget.max_prompt_tokens, 12345)
+            self.assertEqual(tool_log.max_inline_chars, 444)
+            self.assertEqual(summary.summarize_when_history_len_exceeds, 22)
         finally:
             if p.exists():
                 p.unlink()
