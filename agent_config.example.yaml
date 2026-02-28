@@ -42,3 +42,19 @@ search:
     default_mode: balanced
     default_enrich: false
     provider_priority: [tavily, brave]
+
+subagents:
+  enabled: true
+  max_workers_default: 4
+  max_worker_turns_default: 8
+  max_wall_time_s_default: 45.0
+  max_retries_default: 1
+  artifact_dir: artifacts/subagents
+  tool_policy:
+    allow_by_task_type:
+      default: [read_file, read_file_range, search_web, python_repl]
+      research: [search_web, read_file, read_file_range]
+      analysis: [python_repl, read_file, read_file_range, search_web]
+      writing: [read_file, read_file_range, search_web]
+    denylist: [write_file, verify_with_user, spawn_subagents]
+    permitted_overrides: [search_web, python_repl, read_file, read_file_range]

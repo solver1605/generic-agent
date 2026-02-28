@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 from .context_manager import ContextManager
 from .models import AgentState, PromptLibrary
 from .nodes import (
+    activate_subagent_from_tool_result_node,
     activate_skill_from_tool_result_node,
     context_node,
     has_tool_calls,
@@ -84,6 +85,9 @@ def build_app(
     def activate_skill_node(state: AgentState):
         return activate_skill_from_tool_result_node(state) or {}
 
+    def activate_subagent_node(state: AgentState):
+        return activate_subagent_from_tool_result_node(state) or {}
+
     def llm_node_wrapped(state: AgentState):
         return llm_node(state, llm=llm) or {}
 
@@ -95,8 +99,9 @@ def build_app(
     graph.add_node("persist_prompt",       instrument_node("persist_prompt",       persist_prompt_artifact_node))
     graph.add_node("llm",                  instrument_node("llm",                  llm_node_wrapped))
     graph.add_node("tools",                instrument_node("tools",                tools_node_wrapped))
-    graph.add_node("persist_tool_outputs", instrument_node("persist_tool_outputs", persist_node))
     graph.add_node("activate_skill",       instrument_node("activate_skill",       activate_skill_node))
+    graph.add_node("activate_subagents",   instrument_node("activate_subagents",   activate_subagent_node))
+    graph.add_node("persist_tool_outputs", instrument_node("persist_tool_outputs", persist_node))
 
     # --- Entry ---
     graph.set_entry_point("summarize")
@@ -114,10 +119,11 @@ def build_app(
     # llm -> tools or end
     graph.add_conditional_edges("llm", has_tool_calls, {"tools": "tools", "end": END})
 
-    # tools -> persist -> activate_skill -> summarize -> context ...
-    graph.add_edge("tools", "persist_tool_outputs")
-    graph.add_edge("persist_tool_outputs", "activate_skill")
-    graph.add_edge("activate_skill", "summarize")
+    # tools -> activate -> persist -> summarize -> context ...
+    graph.add_edge("tools", "activate_skill")
+    graph.add_edge("activate_skill", "activate_subagents")
+    graph.add_edge("activate_subagents", "persist_tool_outputs")
+    graph.add_edge("persist_tool_outputs", "summarize")
 
     checkpointer = MemorySaver()
     return graph.compile(checkpointer=checkpointer)

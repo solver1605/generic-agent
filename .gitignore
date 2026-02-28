@@ -84,4 +84,7 @@ agent_config.yaml
 artifacts/
 
 # Optional: local skill workspace if used privately
-.skills/
+# Ignore all skills by default, but track deep-research skill package.
+.skills/*
+!.skills/deep-research/
+!.skills/deep-research/**

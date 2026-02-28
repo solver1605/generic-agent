@@ -103,6 +103,23 @@ class ContextManager:
         assembled = system_msgs + active_msgs + skills_msg + mem_msgs + curated_hist
         return self._fit_to_budget(assembled)
 
+    def compose_for_subagent(self, state: Dict[str, Any], task_brief: str) -> List[BaseMessage]:
+        """
+        Compose worker prompt context using the same pipeline with a scoped
+        sub-agent system directive and task brief.
+        """
+        base = self.compose(state)
+        prefix = SystemMessage(
+            content=(
+                "SUBAGENT MODE:\n"
+                "- Execute only the assigned task.\n"
+                "- Return concise factual output with explicit uncertainties.\n"
+                "- If missing information blocks completion, explain precisely what is missing."
+            )
+        )
+        brief = HumanMessage(content=f"Sub-agent task brief:\n{task_brief}")
+        return self._fit_to_budget([prefix] + base + [brief])
+
     def _select_cards(self, sig: ContextSignals) -> List[PromptCard]:
         tags = {"core"}
         if sig.after_tool:

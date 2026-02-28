@@ -159,12 +159,73 @@ def activate_skill_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, Any
     return {}
 
 
+def activate_subagent_from_tool_result_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Detect spawn_subagents tool output and merge deterministic records into runtime:
+      - runtime["subagent_runs"] append-only by request_id
+      - runtime["subagent_results"] task-id map (latest wins)
+      - runtime["subagent_stats"] latest stats object
+    """
+    hist = state.get("history", [])
+    if not hist:
+        return {}
+
+    payload = None
+    for m in reversed(hist):
+        if not isinstance(m, ToolMessage):
+            continue
+        txt = m.content or ""
+        try:
+            obj = json.loads(txt)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and obj.get("__tool") == "spawn_subagents":
+            payload = obj
+            break
+
+    if not payload:
+        return {}
+
+    request_id = str(payload.get("request_id", "")).strip()
+    if not request_id:
+        return {}
+
+    runtime = dict(state.get("runtime", {}) or {})
+    runs = list(runtime.get("subagent_runs", []) or [])
+    if not any(str(r.get("request_id", "")) == request_id for r in runs if isinstance(r, dict)):
+        runs.append(
+            {
+                "request_id": request_id,
+                "status": payload.get("status", "unknown"),
+                "summary": payload.get("summary", ""),
+                "results_count": len(payload.get("results", []) or []),
+                "errors_count": len(payload.get("errors", []) or []),
+                "stats": payload.get("stats", {}),
+            }
+        )
+
+    results_map = dict(runtime.get("subagent_results", {}) or {})
+    for r in payload.get("results", []) or []:
+        if isinstance(r, dict) and r.get("task_id"):
+            results_map[str(r["task_id"])] = r
+
+    runtime["subagent_runs"] = runs
+    runtime["subagent_results"] = results_map
+    runtime["subagent_stats"] = payload.get("stats", {})
+    runtime["last_subagent_request_id"] = request_id
+    return {"runtime": runtime}
+
+
 # ---------------------------------------------------------------------------
 # Core processing nodes
 # ---------------------------------------------------------------------------
 
 def context_node(state: AgentState, ctx_mgr: ContextManager) -> Dict[str, Any]:
-    messages = ctx_mgr.compose(state)
+    runtime = state.get("runtime", {}) or {}
+    if runtime.get("subagent_mode") and runtime.get("subagent_task_brief"):
+        messages = ctx_mgr.compose_for_subagent(state, str(runtime.get("subagent_task_brief", "")))
+    else:
+        messages = ctx_mgr.compose(state)
     return {"messages": messages}
 
 

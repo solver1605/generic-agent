@@ -6,6 +6,8 @@ Tools:
   - read_file_range    — read a line range from a file
   - write_file         — write/append to a file
   - python_repl        — sandboxed Python interpreter
+  - search_web         — web search with multi-provider routing
+  - spawn_subagents    — delegate tasks to dynamic worker sub-agents
   - load_skill         — load a skill body from .skills/
   - verify_with_user   — Human-in-the-Loop gate via LangGraph interrupt
 """
@@ -20,14 +22,17 @@ import random
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
 
 from .models import VerifyRequest
 from .search.engine import SearchRequest, run_search
 from .skills import parse_skill_md
+from .subagents.orchestrator import run_subagents
+from .subagents.types import SubAgentExecutionConfig, SubAgentTask
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +283,40 @@ def search_web(
 
 
 @tool
+def spawn_subagents(
+    tasks: List[SubAgentTask],
+    execution: Optional[SubAgentExecutionConfig] = None,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Spawn dynamic worker sub-agents for parallelizable tasks.
+    """
+    state = state or {}
+    task_models = [SubAgentTask.model_validate(t) for t in (tasks or [])]
+    if not task_models:
+        return {
+            "__tool": "spawn_subagents",
+            "request_id": "",
+            "status": "failed",
+            "summary": "No tasks provided for sub-agent execution.",
+            "results": [],
+            "errors": [{"task_id": "*", "code": "empty_tasks", "message": "No tasks provided.", "retryable": False}],
+            "stats": {"tasks_requested": 0, "tasks_executed": 0},
+        }
+
+    exec_cfg = SubAgentExecutionConfig.model_validate(execution or SubAgentExecutionConfig())
+    record = run_subagents(
+        tasks=task_models,
+        execution=exec_cfg,
+        parent_state=state,
+        all_tools=DEFAULT_TOOLS,
+    )
+    out = record.to_dict()
+    out["__tool"] = "spawn_subagents"
+    return out
+
+
+@tool
 def load_skill(skill_name: str) -> str:
     """
     Load a skill by name from .skills/<dir>/SKILL.md (or by matching frontmatter name)
@@ -319,7 +358,10 @@ def load_skill(skill_name: str) -> str:
 
 
 @tool
-def verify_with_user(request: VerifyRequest) -> Dict[str, Any]:
+def verify_with_user(
+    request: VerifyRequest,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
     """
     Human-in-the-loop gate. When called, execution pauses until the user answers.
     Returns the user's answer to the agent.
@@ -334,6 +376,9 @@ def verify_with_user(request: VerifyRequest) -> Dict[str, Any]:
     - Provide a short context (plan snippet) to help user decide quickly.
     - Ask ONE precise question.
     """
+    if bool((state or {}).get("runtime", {}).get("disable_hitl", False)):
+        raise ValueError("verify_with_user is disabled in worker sub-agent flows. Escalate to supervisor instead.")
+
     answer = interrupt({
         "type": request.kind,
         "reason": request.reason,
@@ -357,5 +402,6 @@ DEFAULT_TOOLS = [
     write_file,
     python_repl,
     search_web,
+    spawn_subagents,
     verify_with_user,
 ]

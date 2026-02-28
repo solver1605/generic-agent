@@ -121,3 +121,46 @@ model_cards:
         card = ModelCard(id="x", provider="openai", model_name="gpt")
         with self.assertRaises(ValueError):
             build_llm_from_model_card(card, google_api_key="k")
+
+    def test_default_config_contains_subagent_defaults(self):
+        cfg = default_agent_config()
+        self.assertTrue(cfg.subagents.enabled)
+        self.assertGreaterEqual(cfg.subagents.max_workers_default, 1)
+        self.assertIn("spawn_subagents", cfg.subagents.tool_policy.denylist)
+
+    def test_load_agent_config_parses_subagent_section(self):
+        p = Path("/tmp/test_agent_config_sub.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+subagents:
+  enabled: true
+  max_workers_default: 3
+  max_worker_turns_default: 6
+  max_wall_time_s_default: 30
+  max_retries_default: 2
+  artifact_dir: artifacts/custom_subagents
+  tool_policy:
+    allow_by_task_type:
+      default: [read_file, search_web]
+    denylist: [write_file, verify_with_user]
+    permitted_overrides: [search_web]
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.subagents.max_workers_default, 3)
+            self.assertEqual(cfg.subagents.max_worker_turns_default, 6)
+            self.assertEqual(cfg.subagents.max_wall_time_s_default, 30)
+            self.assertEqual(cfg.subagents.max_retries_default, 2)
+            self.assertEqual(str(cfg.subagents.artifact_dir), "artifacts/custom_subagents")
+            self.assertEqual(cfg.subagents.tool_policy.allow_by_task_type["default"], ["read_file", "search_web"])
+            self.assertIn("write_file", cfg.subagents.tool_policy.denylist)
+        finally:
+            if p.exists():
+                p.unlink()

@@ -126,6 +126,18 @@ def _serialize_message(m: BaseMessage) -> Dict[str, Any]:
     return data
 
 
+def _resolve_subagent_cfg(cfg) -> Dict[str, Any]:
+    scfg = getattr(cfg, "subagents", None)
+    if scfg is None:
+        # Backward-compatibility for older in-memory AgentConfig instances.
+        return {"enabled": True, "max_workers_default": 4, "max_wall_time_s_default": 45.0}
+    return {
+        "enabled": bool(getattr(scfg, "enabled", True)),
+        "max_workers_default": int(getattr(scfg, "max_workers_default", 4)),
+        "max_wall_time_s_default": float(getattr(scfg, "max_wall_time_s_default", 45.0)),
+    }
+
+
 @st.cache_resource(show_spinner=False)
 def _build_runtime(
     model_card_id: str,
@@ -139,6 +151,7 @@ def _build_runtime(
         raise EnvironmentError("GOOGLE_API_KEY is not set. Add it to your environment or .env file.")
 
     cfg = load_agent_config(Path("agent_config.yaml"))
+    subcfg = _resolve_subagent_cfg(cfg)
     card = cfg.get_model_card(model_card_id=model_card_id)
     if model_name_override.strip():
         card = replace(card, model_name=model_name_override.strip())
@@ -167,7 +180,17 @@ def _build_runtime(
     )
 
     skills = discover_skills(Path(skills_root))
-    return {"app": app, "skills": skills, "model_card": card, "enabled_tool_names": [tool_name(t) for t in tools]}
+    return {
+        "app": app,
+        "skills": skills,
+        "model_card": card,
+        "enabled_tool_names": [tool_name(t) for t in tools],
+        "subagent_defaults": {
+            "enabled": subcfg["enabled"],
+            "max_workers": subcfg["max_workers_default"],
+            "max_wall_time_s": subcfg["max_wall_time_s_default"],
+        },
+    }
 
 
 def _init_session(runtime: Dict[str, Any]) -> None:
@@ -183,7 +206,17 @@ def _init_session(runtime: Dict[str, Any]) -> None:
     st.session_state.current_state = {
         "history": [],
         "memory": {},
-        "runtime": {"run_id": run_id, "turn_index": 0},
+        "runtime": {
+            "run_id": run_id,
+            "turn_index": 0,
+            "model_card_id": runtime["model_card"].id,
+            "model_name": runtime["model_card"].model_name,
+            "thinking_budget": runtime["model_card"].thinking_budget,
+            "enabled_tool_names": runtime["enabled_tool_names"],
+            "subagent_enabled": runtime["subagent_defaults"]["enabled"],
+            "subagent_max_workers": runtime["subagent_defaults"]["max_workers"],
+            "subagent_max_wall_time_s": runtime["subagent_defaults"]["max_wall_time_s"],
+        },
         "skills": runtime["skills"],
     }
 
@@ -224,6 +257,20 @@ def _run_graph(input_obj: Any, runtime: Dict[str, Any]) -> None:
         st.session_state.pending_interrupt = None
 
 
+def _apply_runtime_controls(state: Dict[str, Any]) -> Dict[str, Any]:
+    rt = dict(state.get("runtime", {}) or {})
+    rt["subagent_enabled"] = bool(st.session_state.get("subagent_enabled_ui", rt.get("subagent_enabled", True)))
+    rt["subagent_max_workers"] = int(st.session_state.get("subagent_max_workers_ui", rt.get("subagent_max_workers", 4)))
+    rt["subagent_max_wall_time_s"] = float(
+        st.session_state.get("subagent_max_wall_time_ui", rt.get("subagent_max_wall_time_s", 45.0))
+    )
+    if st.session_state.get("enabled_tool_names_ui"):
+        rt["enabled_tool_names"] = list(st.session_state.get("enabled_tool_names_ui"))
+    state = dict(state)
+    state["runtime"] = rt
+    return state
+
+
 def _render_chat_history(show_tools: bool) -> None:
     hist = get_history_from_state(st.session_state.current_state)
     for m in hist:
@@ -252,6 +299,26 @@ def _render_chat_history(show_tools: bool) -> None:
                 if getattr(m, "tool_call_id", None):
                     st.caption(f"tool_call_id: {m.tool_call_id}")
             continue
+
+
+def _render_subagent_runs(state: Dict[str, Any]) -> None:
+    runtime = state.get("runtime", {}) or {}
+    runs = list(runtime.get("subagent_runs", []) or [])
+    if not runs:
+        return
+
+    st.markdown("### Sub-agent Runs")
+    for run in reversed(runs[-8:]):
+        if not isinstance(run, dict):
+            continue
+        request_id = run.get("request_id", "unknown")
+        status = run.get("status", "unknown")
+        results_count = run.get("results_count", 0)
+        errors_count = run.get("errors_count", 0)
+        label = f"{request_id} · status={status} · results={results_count} · errors={errors_count}"
+        with st.expander(label, expanded=False):
+            st.markdown(run.get("summary", "") or "_(no summary)_")
+            st.json(run.get("stats", {}))
 
 
 def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
@@ -296,11 +363,12 @@ def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
 
 
 def _run_user_turn(prompt: str, runtime: Dict[str, Any]) -> None:
-    hist = list(st.session_state.current_state.get("history", []))
+    cur_state = _apply_runtime_controls(st.session_state.current_state)
+    hist = list(cur_state.get("history", []))
     hist.append(HumanMessage(content=prompt))
 
     next_state = {
-        **st.session_state.current_state,
+        **cur_state,
         "history": hist,
     }
 
@@ -312,6 +380,7 @@ def _render_user_view(runtime: Dict[str, Any]) -> None:
     show_tools = st.toggle("Show tool messages in chat", value=False)
 
     _render_chat_history(show_tools=show_tools)
+    _render_subagent_runs(st.session_state.current_state)
 
     if st.session_state.pending_interrupt:
         _render_interrupt_card(runtime)
@@ -350,7 +419,7 @@ def _render_debug_view() -> None:
         snap = current
         diff = {}
 
-    tabs = st.tabs(["History", "Prompt", "Runtime", "Memory", "Telemetry", "Diff"])
+    tabs = st.tabs(["History", "Prompt", "Runtime", "Memory", "Sub-agents", "Telemetry", "Diff"])
 
     with tabs[0]:
         serial = [_serialize_message(m) for m in get_history_from_state(snap)]
@@ -367,10 +436,21 @@ def _render_debug_view() -> None:
         st.json(snap.get("memory", {}))
 
     with tabs[4]:
+        rt = snap.get("runtime", {}) or {}
+        st.json(
+            {
+                "subagent_runs": rt.get("subagent_runs", []),
+                "subagent_results": rt.get("subagent_results", {}),
+                "subagent_stats": rt.get("subagent_stats", {}),
+                "last_subagent_request_id": rt.get("last_subagent_request_id"),
+            }
+        )
+
+    with tabs[5]:
         tel = snap.get("telemetry", []) or []
         st.json(tel[-25:])
 
-    with tabs[5]:
+    with tabs[6]:
         st.json(diff)
 
 
@@ -382,6 +462,10 @@ def _reset_session() -> None:
         "last_snap",
         "pending_interrupt",
         "current_state",
+        "enabled_tool_names_ui",
+        "subagent_enabled_ui",
+        "subagent_max_workers_ui",
+        "subagent_max_wall_time_ui",
     ]:
         if k in st.session_state:
             del st.session_state[k]
@@ -394,6 +478,7 @@ def main() -> None:
     with st.sidebar:
         st.header("Configuration")
         cfg = load_agent_config(Path("agent_config.yaml"))
+        subcfg = _resolve_subagent_cfg(cfg)
         card_ids = [c.id for c in cfg.model_cards]
         default_idx = card_ids.index(cfg.default_model_card) if cfg.default_model_card in card_ids else 0
         model_card_id = st.selectbox("Model card", options=card_ids, index=default_idx)
@@ -419,10 +504,33 @@ def main() -> None:
             desc = (entry["description"] or "").strip()
             if desc:
                 st.caption(desc.splitlines()[0][:180])
+        st.subheader("Sub-agent Controls")
+        subagent_enabled_ui = st.checkbox(
+            "Enable sub-agents",
+            value=bool(st.session_state.get("subagent_enabled_ui", subcfg["enabled"])),
+            key="subagent_enabled_ui",
+        )
+        st.number_input(
+            "Sub-agent max workers",
+            min_value=1,
+            max_value=16,
+            value=int(st.session_state.get("subagent_max_workers_ui", subcfg["max_workers_default"])),
+            step=1,
+            key="subagent_max_workers_ui",
+        )
+        st.number_input(
+            "Sub-agent max wall time (s)",
+            min_value=5.0,
+            max_value=600.0,
+            value=float(st.session_state.get("subagent_max_wall_time_ui", subcfg["max_wall_time_s_default"])),
+            step=5.0,
+            key="subagent_max_wall_time_ui",
+        )
         st.caption("Set GOOGLE_API_KEY in .env or environment before running.")
         if st.button("Reset Session"):
             _reset_session()
             st.rerun()
+        st.session_state["enabled_tool_names_ui"] = list(sorted(enabled_names))
 
     try:
         runtime = _build_runtime(
@@ -443,6 +551,10 @@ def main() -> None:
         f"thinking_budget={runtime['model_card'].thinking_budget}"
     )
     st.sidebar.caption("Enabled tools: " + ", ".join(runtime["enabled_tool_names"]))
+    st.sidebar.caption(
+        "Sub-agents: "
+        + ("enabled" if st.session_state.get("subagent_enabled_ui", runtime["subagent_defaults"]["enabled"]) else "disabled")
+    )
 
     _init_session(runtime)
 

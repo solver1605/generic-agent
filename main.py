@@ -72,6 +72,10 @@ def main():
         )
 
     cfg = load_agent_config(Path("agent_config.yaml"))
+    scfg = getattr(cfg, "subagents", None)
+    subagent_enabled = bool(getattr(scfg, "enabled", True))
+    subagent_max_workers = int(getattr(scfg, "max_workers_default", 4))
+    subagent_max_wall_time_s = float(getattr(scfg, "max_wall_time_s_default", 45.0))
     model_card_id = os.environ.get("MODEL_CARD")
     selected_card = cfg.get_model_card(model_card_id)
 
@@ -116,7 +120,17 @@ def main():
     state = {
         "history": [HumanMessage(content="Hello! Can you tell me what tools and skills you have available?")],
         "memory": {},
-        "runtime": {"run_id": run_id, "turn_index": 0},
+        "runtime": {
+            "run_id": run_id,
+            "turn_index": 0,
+            "model_card_id": selected_card.id,
+            "model_name": selected_card.model_name,
+            "thinking_budget": selected_card.thinking_budget,
+            "enabled_tool_names": [getattr(t, "name", getattr(t, "__name__", str(t))) for t in tools],
+            "subagent_enabled": subagent_enabled,
+            "subagent_max_workers": subagent_max_workers,
+            "subagent_max_wall_time_s": subagent_max_wall_time_s,
+        },
         "skills": skills,
     }
 

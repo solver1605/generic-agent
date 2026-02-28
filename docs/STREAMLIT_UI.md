@@ -52,4 +52,15 @@ The app provides two tabs:
 - Sidebar shows an `Available Tools` section with per-tool toggles.
 - Enabled tools are bound to the agent for the current run.
 - `search_web` is included in the default tool catalog.
+- `spawn_subagents` is included and can be toggled like any other tool.
 - If all tools are disabled, runtime initialization is blocked until at least one is enabled.
+
+## Sub-Agent Controls
+
+- Sidebar provides sub-agent runtime knobs:
+  - `Enable sub-agents`
+  - `Sub-agent max workers`
+  - `Sub-agent max wall time (s)`
+- These values are injected into runtime and used by `spawn_subagents`.
+- User view renders compact sub-agent run cards with expandable details.
+- Debug view includes a `Sub-agents` tab with run/result/stats payloads.

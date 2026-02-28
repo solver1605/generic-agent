@@ -81,10 +81,29 @@ class SearchConfig:
 
 
 @dataclass
+class SubAgentToolPolicyConfig:
+    allow_by_task_type: Dict[str, List[str]] = field(default_factory=dict)
+    denylist: List[str] = field(default_factory=list)
+    permitted_overrides: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SubAgentConfig:
+    enabled: bool = True
+    max_workers_default: int = 4
+    max_worker_turns_default: int = 8
+    max_wall_time_s_default: float = 45.0
+    max_retries_default: int = 1
+    artifact_dir: Path = Path("artifacts/subagents")
+    tool_policy: SubAgentToolPolicyConfig = field(default_factory=SubAgentToolPolicyConfig)
+
+
+@dataclass
 class AgentConfig:
     model_cards: List[ModelCard]
     default_model_card: str
     search: SearchConfig = field(default_factory=SearchConfig)
+    subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
 
     def get_model_card(self, model_card_id: Optional[str] = None) -> ModelCard:
         selected = model_card_id or self.default_model_card
@@ -144,6 +163,24 @@ def default_agent_config() -> AgentConfig:
                 default_mode="balanced",
                 default_enrich=False,
                 provider_priority=["tavily", "brave"],
+            ),
+        ),
+        subagents=SubAgentConfig(
+            enabled=True,
+            max_workers_default=4,
+            max_worker_turns_default=8,
+            max_wall_time_s_default=45.0,
+            max_retries_default=1,
+            artifact_dir=Path("artifacts/subagents"),
+            tool_policy=SubAgentToolPolicyConfig(
+                allow_by_task_type={
+                    "default": ["read_file", "read_file_range", "search_web", "python_repl"],
+                    "research": ["search_web", "read_file", "read_file_range"],
+                    "analysis": ["python_repl", "read_file", "read_file_range", "search_web"],
+                    "writing": ["read_file", "read_file_range", "search_web"],
+                },
+                denylist=["write_file", "verify_with_user", "spawn_subagents"],
+                permitted_overrides=["search_web", "python_repl", "read_file", "read_file_range"],
             ),
         ),
     )
@@ -227,10 +264,29 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         provider_priority=list(defaults_raw.get("provider_priority", base.search.defaults.provider_priority)),
     )
 
+    sub_raw = raw.get("subagents", {}) or {}
+    tool_policy_raw = sub_raw.get("tool_policy", {}) or {}
+    subagents = SubAgentConfig(
+        enabled=bool(sub_raw.get("enabled", base.subagents.enabled)),
+        max_workers_default=int(sub_raw.get("max_workers_default", base.subagents.max_workers_default)),
+        max_worker_turns_default=int(sub_raw.get("max_worker_turns_default", base.subagents.max_worker_turns_default)),
+        max_wall_time_s_default=float(sub_raw.get("max_wall_time_s_default", base.subagents.max_wall_time_s_default)),
+        max_retries_default=int(sub_raw.get("max_retries_default", base.subagents.max_retries_default)),
+        artifact_dir=Path(str(sub_raw.get("artifact_dir", base.subagents.artifact_dir))),
+        tool_policy=SubAgentToolPolicyConfig(
+            allow_by_task_type=dict(tool_policy_raw.get("allow_by_task_type", base.subagents.tool_policy.allow_by_task_type)),
+            denylist=list(tool_policy_raw.get("denylist", base.subagents.tool_policy.denylist)),
+            permitted_overrides=list(
+                tool_policy_raw.get("permitted_overrides", base.subagents.tool_policy.permitted_overrides)
+            ),
+        ),
+    )
+
     return AgentConfig(
         model_cards=cards,
         default_model_card=default_id,
         search=SearchConfig(providers=providers, budgets=budgets, defaults=defaults),
+        subagents=subagents,
     )
 
 

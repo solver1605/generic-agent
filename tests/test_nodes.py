@@ -6,6 +6,7 @@ from unittest import TestCase
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.emergent_planner.nodes import (
+    activate_subagent_from_tool_result_node,
     activate_skill_from_tool_result_node,
     has_tool_calls,
     persist_tool_outputs_node,
@@ -143,3 +144,23 @@ class TestNodes(TestCase):
     def test_activate_skill_from_tool_result_node_ignores_non_json_payloads(self):
         state = {"history": [ToolMessage(content="not-json", tool_call_id="tc")], "runtime": {}}
         self.assertEqual(activate_skill_from_tool_result_node(state), {})
+
+    def test_activate_subagent_from_tool_result_node_merges_runtime(self):
+        payload = {
+            "__tool": "spawn_subagents",
+            "request_id": "subreq_1",
+            "status": "partial",
+            "summary": "done",
+            "results": [{"task_id": "t1", "status": "ok", "summary": "s1"}],
+            "errors": [{"task_id": "t2", "code": "err"}],
+            "stats": {"tasks_completed": 1},
+        }
+        state = {
+            "history": [ToolMessage(content=json.dumps(payload), tool_call_id="tc")],
+            "runtime": {},
+        }
+        out = activate_subagent_from_tool_result_node(state)
+        rt = out["runtime"]
+        self.assertEqual(rt["last_subagent_request_id"], "subreq_1")
+        self.assertEqual(len(rt["subagent_runs"]), 1)
+        self.assertIn("t1", rt["subagent_results"])

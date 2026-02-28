@@ -112,7 +112,7 @@ class AgentState(TypedDict, total=False):
     history: List[AnyMessage]          # ground truth conversation
     messages: List[AnyMessage]         # curated messages passed to LLM
     memory: Dict[str, Any]             # summaries / episodic notes
-    runtime: Dict[str, Any]            # turn flags, last tool, errors
+    runtime: Dict[str, Any]            # turn flags, last tool, errors, subagent_runs/results/stats
     skills: List[SkillMeta]            # discovered skills
     file_system: Annotated[Dict[str, Any], file_reducer]
     telemetry: List[Dict[str, Any]]    # per-node observability records
