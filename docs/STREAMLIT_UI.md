@@ -10,6 +10,17 @@ streamlit run streamlit_app.py
 Environment:
 - `GOOGLE_API_KEY` is required.
 - Optional: `agent_config.yaml` with model cards (see `agent_config.example.yaml`).
+- Optional branding in config:
+  - `streamlit.app_name` controls on-page title.
+  - `streamlit.page_title` controls browser tab title.
+
+Example:
+
+```yaml
+streamlit:
+  app_name: Research Copilot
+  page_title: Research Copilot UI
+```
 
 ## Views
 

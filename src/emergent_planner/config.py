@@ -136,6 +136,12 @@ class ToolCatalogConfig:
 
 
 @dataclass
+class StreamlitUIConfig:
+    app_name: str = "Emergent Planner"
+    page_title: str = "Emergent Planner UI"
+
+
+@dataclass
 class ProfileToolPolicyConfig:
     allow: List[str] = field(default_factory=list)
     deny: List[str] = field(default_factory=list)
@@ -167,6 +173,7 @@ class AgentConfig:
     subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
     policy_profiles: List[PolicyProfileConfig] = field(default_factory=list)
     default_policy_profile: str = "balanced"
+    streamlit: StreamlitUIConfig = field(default_factory=StreamlitUIConfig)
     tool_catalog: ToolCatalogConfig = field(default_factory=ToolCatalogConfig)
     agent_profiles: List[AgentProfileConfig] = field(default_factory=list)
     default_agent_profile: str = "default"
@@ -610,6 +617,17 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         ]
         or list(base.tool_catalog.allow_module_prefixes),
     )
+    streamlit_raw = raw.get("streamlit", {}) or raw.get("ui", {}) or {}
+    streamlit_cfg = StreamlitUIConfig(
+        app_name=(
+            str(streamlit_raw.get("app_name", base.streamlit.app_name)).strip()
+            or base.streamlit.app_name
+        ),
+        page_title=(
+            str(streamlit_raw.get("page_title", base.streamlit.page_title)).strip()
+            or base.streamlit.page_title
+        ),
+    )
 
     agent_profiles, default_agent_profile = _parse_agent_profiles(
         raw,
@@ -624,6 +642,7 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         subagents=subagents,
         policy_profiles=profile_list,
         default_policy_profile=default_policy_profile,
+        streamlit=streamlit_cfg,
         tool_catalog=tool_catalog,
         agent_profiles=agent_profiles,
         default_agent_profile=default_agent_profile,

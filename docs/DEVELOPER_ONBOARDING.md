@@ -91,6 +91,7 @@ Your YAML profile controls:
 
 - `model_card_id`
 - `policy_profile_id`
+- `streamlit.app_name` and `streamlit.page_title` (UI branding)
 - `prompts` (merge/replace cards)
 - `tools.allow` and `tools.deny`
 - `skills.roots`, `skills.allowlist`, `skills.denylist`

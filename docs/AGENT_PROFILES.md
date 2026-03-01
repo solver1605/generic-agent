@@ -13,6 +13,18 @@ Runtime (CLI + Streamlit) selects one active `agent_profile` per session.
 
 ## New config sections
 
+## `streamlit`
+
+```yaml
+streamlit:
+  app_name: Research Copilot
+  page_title: Research Copilot UI
+```
+
+- `app_name`: heading shown in Streamlit app body
+- `page_title`: browser tab title
+- both are optional and default to `Emergent Planner` / `Emergent Planner UI`
+
 ## `tool_catalog`
 
 ```yaml

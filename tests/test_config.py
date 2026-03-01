@@ -240,6 +240,34 @@ policy_profiles:
         prof = cfg.get_agent_profile()
         self.assertEqual(prof.id, "default")
 
+    def test_default_config_contains_streamlit_branding(self):
+        cfg = default_agent_config()
+        self.assertEqual(cfg.streamlit.app_name, "Emergent Planner")
+        self.assertEqual(cfg.streamlit.page_title, "Emergent Planner UI")
+
+    def test_load_agent_config_parses_streamlit_branding(self):
+        p = Path("/tmp/test_agent_config_streamlit_branding.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+streamlit:
+  app_name: Research Copilot
+  page_title: Research Copilot Console
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.streamlit.app_name, "Research Copilot")
+            self.assertEqual(cfg.streamlit.page_title, "Research Copilot Console")
+        finally:
+            if p.exists():
+                p.unlink()
+
     def test_load_agent_config_legacy_autowrap_profile(self):
         p = Path("/tmp/test_agent_config_legacy_wrap.yaml")
         p.write_text(

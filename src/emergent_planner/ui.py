@@ -1036,21 +1036,45 @@ def _render_tool_selector(catalog: List[Dict[str, str]]) -> List[str]:
     return enabled_names
 
 
+def _resolve_initial_config_path() -> Path:
+    default_config_path = os.environ.get("GENERIC_AGENT_CONFIG", "agent_config.yaml")
+    config_path_text = str(st.session_state.get("config_path_ui", default_config_path)).strip()
+    return Path(config_path_text or default_config_path).expanduser()
+
+
+def _resolve_streamlit_branding(config_path: Path) -> tuple[str, str]:
+    default_app_name = "Emergent Planner"
+    default_page_title = "Emergent Planner UI"
+    try:
+        cfg = load_agent_config(config_path)
+        app_name = str(getattr(cfg.streamlit, "app_name", default_app_name) or "").strip() or default_app_name
+        page_title = str(getattr(cfg.streamlit, "page_title", default_page_title) or "").strip() or default_page_title
+        return app_name, page_title
+    except Exception:
+        return default_app_name, default_page_title
+
+
 def main() -> None:
-    st.set_page_config(page_title="Emergent Planner UI", layout="wide")
-    st.title("Emergent Planner")
+    initial_config_path = _resolve_initial_config_path()
+    app_name, page_title = _resolve_streamlit_branding(initial_config_path)
+    st.set_page_config(page_title=page_title, layout="wide")
+    st.title(app_name)
 
     with st.sidebar:
         st.header("Configuration")
         default_config_path = os.environ.get("GENERIC_AGENT_CONFIG", "agent_config.yaml")
         config_path_text = st.text_input(
             "Config path",
-            value=str(st.session_state.get("config_path_ui", default_config_path)),
+            value=str(st.session_state.get("config_path_ui", initial_config_path.as_posix())),
             key="config_path_ui",
             help="Profile/model/tool configuration YAML path.",
         ).strip()
         config_path = Path(config_path_text or default_config_path).expanduser()
-        cfg = load_agent_config(config_path)
+        try:
+            cfg = load_agent_config(config_path)
+        except Exception as e:
+            st.error(f"Failed to load config: {e}")
+            st.stop()
         subcfg = _resolve_subagent_cfg(cfg)
         agent_profile_ids = [p.id for p in cfg.agent_profiles] or [cfg.default_agent_profile]
         current_agent_profile = str(st.session_state.get("agent_profile_id_ui", cfg.default_agent_profile))

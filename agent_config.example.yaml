@@ -2,6 +2,10 @@ default_model_card: gemini_flash_fast
 default_policy_profile: balanced
 default_agent_profile: default
 
+streamlit:
+  app_name: Emergent Planner
+  page_title: Emergent Planner UI
+
 model_cards:
   - id: gemini_flash_fast
     provider: google_genai
