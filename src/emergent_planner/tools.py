@@ -5,6 +5,8 @@ Tools:
   - read_file          — read a file from disk
   - read_file_range    — read a line range from a file
   - write_file         — write/append to a file
+  - write_excel_file   — create/update Excel workbooks
+  - create_pptx_deck   — create/update PowerPoint decks
   - python_repl        — sandboxed Python interpreter
   - search_web         — web search with multi-provider routing
   - spawn_subagents    — delegate tasks to dynamic worker sub-agents
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import importlib
 import io
 import json
 import math
@@ -28,11 +31,18 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
 
+from .config import load_agent_config
 from .models import VerifyRequest
 from .search.engine import SearchRequest, run_search
-from .skills import discover_skills
+from .skills import discover_skills, discover_skills_in_roots
 from .subagents.orchestrator import run_subagents
 from .subagents.types import SubAgentExecutionConfig, SubAgentTask
+from .tool_loader import build_tool_catalog
+from .tool_registry import select_tools
+
+_ARTIFACTS_ROOT = Path("artifacts")
+_REPORT_FILE_EXTS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".html"}
+_REPORT_HINTS = {"report", "research", "summary", "findings", "brief", "plan"}
 
 
 def _normalize_skill_key(name: str) -> str:
@@ -44,6 +54,44 @@ def _normalize_skill_key(name: str) -> str:
     if not raw:
         return ""
     return re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+
+
+def _require_module(module_name: str, pip_name: str):
+    """
+    Lazy import helper so optional dependencies are only required when a tool is called.
+    """
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            f"Missing optional dependency '{module_name}'. Install with: pip install {pip_name}"
+        ) from e
+
+
+def _sanitize_relative_path(p: Path) -> Path:
+    parts = [
+        part
+        for part in p.parts
+        if part and part not in {".", "..", "/", "\\"} and part != p.anchor
+    ]
+    return Path(*parts) if parts else Path("output")
+
+
+def _coerce_artifact_path(path: str, category: str) -> Path:
+    raw = Path(path).expanduser()
+    if "artifacts" in raw.parts:
+        idx = raw.parts.index("artifacts")
+        tail = Path(*raw.parts[idx + 1:]) if (idx + 1) < len(raw.parts) else Path()
+        return _ARTIFACTS_ROOT / _sanitize_relative_path(tail)
+    rel = Path(raw.name) if raw.is_absolute() else _sanitize_relative_path(raw)
+    return _ARTIFACTS_ROOT / category / rel
+
+
+def _is_report_like_path(path: Path) -> bool:
+    if path.suffix.lower() not in _REPORT_FILE_EXTS:
+        return False
+    lowered = "/".join(path.parts).lower()
+    return any(k in lowered for k in _REPORT_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -117,18 +165,200 @@ def write_file(path: str, content: str, mode: str = "overwrite") -> str:
     Returns:
         Confirmation message describing the operation.
     """
-    p = Path(path)
+    p_raw = Path(path)
+    if "artifacts" in p_raw.parts or _is_report_like_path(p_raw):
+        p = _coerce_artifact_path(path, category="reports")
+    else:
+        p = p_raw
     p.parent.mkdir(parents=True, exist_ok=True)
 
     if mode == "overwrite":
         p.write_text(content)
-        return f"File written (overwrite): {path}"
+        return f"File written (overwrite): {p.as_posix()}"
     elif mode == "append":
         with p.open("a") as f:
             f.write(content)
-        return f"Content appended to file: {path}"
+        return f"Content appended to file: {p.as_posix()}"
     else:
         raise ValueError("Mode must be 'overwrite' or 'append'")
+
+
+# ---------------------------------------------------------------------------
+# Office Document Tools
+# ---------------------------------------------------------------------------
+
+@tool
+def write_excel_file(
+    path: str,
+    sheets: List[Dict[str, Any]],
+    mode: Literal["overwrite", "append"] = "overwrite",
+) -> Dict[str, Any]:
+    """
+    Create or update an Excel workbook (.xlsx/.xlsm) with structured sheet data.
+
+    Sheet spec:
+      - name: str
+      - rows: List[List[Any]]
+      - start_row: int (optional, default=1)
+      - start_col: int (optional, default=1)
+      - clear_sheet: bool (optional, default=False)
+    """
+    p = _coerce_artifact_path(path, category="excel")
+    if p.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("Excel path must end with .xlsx or .xlsm")
+    if mode not in {"overwrite", "append"}:
+        raise ValueError("Mode must be 'overwrite' or 'append'")
+
+    openpyxl = _require_module("openpyxl", "openpyxl")
+    Workbook = getattr(openpyxl, "Workbook")
+    load_workbook = getattr(openpyxl, "load_workbook")
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    if mode == "append" and p.exists():
+        wb = load_workbook(p.as_posix())
+    else:
+        wb = Workbook()
+        if len(getattr(wb, "worksheets", [])) == 1 and getattr(wb.active, "title", "") == "Sheet":
+            wb.remove(wb.active)
+
+    written_sheets: List[str] = []
+    total_rows = 0
+
+    for idx, spec in enumerate(sheets or []):
+        if not isinstance(spec, dict):
+            raise ValueError(f"sheets[{idx}] must be an object")
+        name = str(spec.get("name", "")).strip()
+        rows = spec.get("rows", [])
+        if not name:
+            raise ValueError(f"sheets[{idx}].name is required")
+        if not isinstance(rows, list):
+            raise ValueError(f"sheets[{idx}].rows must be a list")
+
+        start_row = int(spec.get("start_row", 1))
+        start_col = int(spec.get("start_col", 1))
+        clear_sheet = bool(spec.get("clear_sheet", False))
+        if start_row < 1 or start_col < 1:
+            raise ValueError(f"sheets[{idx}] start_row/start_col must be >= 1")
+
+        if name in set(wb.sheetnames):
+            ws = wb[name]
+        else:
+            ws = wb.create_sheet(title=name)
+
+        if clear_sheet and getattr(ws, "max_row", 0) > 0:
+            ws.delete_rows(1, ws.max_row)
+
+        for r, row_vals in enumerate(rows):
+            if not isinstance(row_vals, list):
+                raise ValueError(f"sheets[{idx}].rows[{r}] must be a list")
+            for c, val in enumerate(row_vals):
+                ws.cell(row=start_row + r, column=start_col + c, value=val)
+
+        written_sheets.append(name)
+        total_rows += len(rows)
+
+    if not written_sheets and "Sheet" not in set(wb.sheetnames):
+        wb.create_sheet(title="Sheet")
+
+    wb.save(p.as_posix())
+    return {
+        "path": p.as_posix(),
+        "mode": mode,
+        "sheets_written": written_sheets,
+        "rows_written": total_rows,
+        "status": "ok",
+    }
+
+
+@tool
+def create_pptx_deck(
+    path: str,
+    slides: List[Dict[str, Any]],
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    mode: Literal["overwrite", "append"] = "overwrite",
+) -> Dict[str, Any]:
+    """
+    Create or append to a PowerPoint deck (.pptx) using structured slide data.
+
+    Slide spec:
+      - title: str (optional)
+      - bullets: List[str] (optional)
+      - body: str (optional)
+      - notes: str (optional)
+      - layout: int (optional, default=1)
+    """
+    p = _coerce_artifact_path(path, category="ppt")
+    if p.suffix.lower() != ".pptx":
+        raise ValueError("PowerPoint path must end with .pptx")
+    if mode not in {"overwrite", "append"}:
+        raise ValueError("Mode must be 'overwrite' or 'append'")
+
+    pptx = _require_module("pptx", "python-pptx")
+    Presentation = getattr(pptx, "Presentation")
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "append" and p.exists():
+        pres = Presentation(p.as_posix())
+    else:
+        pres = Presentation()
+
+    slides_added = 0
+    starting_slides = len(list(pres.slides))
+
+    if title and mode == "overwrite":
+        title_slide_layout = pres.slide_layouts[0]
+        s = pres.slides.add_slide(title_slide_layout)
+        if getattr(getattr(s, "shapes", None), "title", None) is not None:
+            s.shapes.title.text = str(title)
+        if subtitle and len(getattr(s, "placeholders", [])) > 1:
+            s.placeholders[1].text = str(subtitle)
+        slides_added += 1
+
+    for idx, spec in enumerate(slides or []):
+        if not isinstance(spec, dict):
+            raise ValueError(f"slides[{idx}] must be an object")
+        layout = int(spec.get("layout", 1))
+        if layout < 0 or layout >= len(pres.slide_layouts):
+            raise ValueError(f"slides[{idx}].layout is out of range (0..{len(pres.slide_layouts)-1})")
+
+        s = pres.slides.add_slide(pres.slide_layouts[layout])
+        slide_title = str(spec.get("title", "") or "")
+        body = str(spec.get("body", "") or "")
+        bullets = spec.get("bullets", []) or []
+        notes = str(spec.get("notes", "") or "")
+
+        if slide_title and getattr(getattr(s, "shapes", None), "title", None) is not None:
+            s.shapes.title.text = slide_title
+
+        body_placeholder = None
+        if len(getattr(s, "placeholders", [])) > 1:
+            body_placeholder = s.placeholders[1]
+
+        if body_placeholder is not None:
+            tf = body_placeholder.text_frame
+            if body:
+                tf.text = body
+            elif isinstance(bullets, list) and bullets:
+                tf.text = str(bullets[0])
+                for b in bullets[1:]:
+                    tf.add_paragraph().text = str(b)
+
+        if notes:
+            s.notes_slide.notes_text_frame.text = notes
+
+        slides_added += 1
+
+    pres.save(p.as_posix())
+    return {
+        "path": p.as_posix(),
+        "mode": mode,
+        "slides_added": slides_added,
+        "total_slides": len(list(pres.slides)),
+        "starting_slides": starting_slides,
+        "status": "ok",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +546,16 @@ def spawn_subagents(
         }
 
     exec_cfg = SubAgentExecutionConfig.model_validate(execution or SubAgentExecutionConfig())
+    cfg = load_agent_config(Path("agent_config.yaml"))
+    all_tools = build_tool_catalog(cfg, DEFAULT_TOOLS)
+    enabled_names = list((state or {}).get("runtime", {}).get("enabled_tool_names", []) or [])
+    if enabled_names:
+        all_tools = select_tools(all_tools, enabled_names)
     record = run_subagents(
         tasks=task_models,
         execution=exec_cfg,
         parent_state=state,
-        all_tools=DEFAULT_TOOLS,
+        all_tools=all_tools or DEFAULT_TOOLS,
     )
     out = record.to_dict()
     out["__tool"] = "spawn_subagents"
@@ -328,7 +563,10 @@ def spawn_subagents(
 
 
 @tool
-def load_skill(skill_name: str) -> str:
+def load_skill(
+    skill_name: str,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> str:
     """
     Load a skill by name from discovered SKILL.md files under project skills roots
     (supports recursive discovery).
@@ -338,14 +576,39 @@ def load_skill(skill_name: str) -> str:
     if not needle:
         raise ValueError("skill_name cannot be empty")
 
-    skills = discover_skills(Path(".skills"), include_body=True)
+    runtime = dict((state or {}).get("runtime", {}) or {})
+    scoped_roots = list(runtime.get("skills_roots_resolved", []) or [])
+    if scoped_roots:
+        skills = discover_skills_in_roots(
+            [Path(str(p)) for p in scoped_roots],
+            include_body=True,
+            strict_scope=True,
+        )
+    else:
+        skills = discover_skills(Path(".skills"), include_body=True)
+
+    allowlist_norm = {
+        _normalize_skill_key(x)
+        for x in (runtime.get("skills_allowlist_norm", []) or [])
+        if _normalize_skill_key(x)
+    }
+    denylist_norm = {
+        _normalize_skill_key(x)
+        for x in (runtime.get("skills_denylist_norm", []) or [])
+        if _normalize_skill_key(x)
+    }
     aliases = {needle}
     aliases.add(needle.replace("-", "_"))
     aliases.add(needle.replace("_", "-"))
 
     for sk in skills:
+        sk_norm = _normalize_skill_key(sk.name)
+        if allowlist_norm and sk_norm not in allowlist_norm:
+            continue
+        if sk_norm in denylist_norm:
+            continue
         candidates = {
-            _normalize_skill_key(sk.name),
+            sk_norm,
             _normalize_skill_key(sk.path.parent.name),
         }
         if candidates & aliases:
@@ -404,6 +667,8 @@ DEFAULT_TOOLS = [
     read_file,
     read_file_range,
     write_file,
+    write_excel_file,
+    create_pptx_deck,
     python_repl,
     search_web,
     spawn_subagents,

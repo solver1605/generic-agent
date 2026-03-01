@@ -1,0 +1,27 @@
+default_model_card: gemini_flash_reasoning
+default_policy_profile: deep_research
+default_agent_profile: researcher
+
+tool_catalog:
+  allow_module_prefixes: [custom_tools, emergent_planner]
+  custom_imports:
+    - custom_tools.research:build_tools
+
+agent_profiles:
+  - id: researcher
+    description: "Specialized profile for web research and synthesis"
+    model_card_id: gemini_flash_reasoning
+    policy_profile_id: deep_research
+    prompts:
+      strategy: merge
+      cards:
+        - name: guidelines
+          tags: [core]
+          priority: 20
+          file: ../prompts/research_guidelines.md
+    tools:
+      allow: [search_web, spawn_subagents, verify_with_user, load_skill, summarize_topic]
+      deny: [python_repl]
+    skills:
+      roots: [../skills]
+      allowlist: [domain-research]

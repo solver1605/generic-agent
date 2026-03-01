@@ -126,3 +126,19 @@ Beta body.
                     self.assertTrue((payload.get("body") or "").strip())
             finally:
                 os.chdir(old)
+
+    def test_repo_deep_research_skill_is_discoverable_and_loadable_with_alias(self):
+        skills = discover_skills(Path(".skills"))
+        names = [s.name for s in skills]
+        self.assertIn("deep-research", names)
+
+        raw = load_skill.invoke({"skill_name": "deep-research"})
+        payload = json.loads(raw)
+        self.assertEqual(payload["name"], "deep-research")
+        self.assertIn("Deep Research", payload.get("body", ""))
+
+        raw_alias = load_skill.invoke({"skill_name": "deep_research"})
+        payload_alias = json.loads(raw_alias)
+        self.assertEqual(payload_alias["name"], "deep-research")
+
+        self.assertFalse(Path(".skills/deep-research/agents/openai.yaml").exists())

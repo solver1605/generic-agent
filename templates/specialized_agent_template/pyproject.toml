@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-specialized-agent"
+version = "0.1.0"
+description = "Example specialized agent plugin for GenericAgent runtime"
+requires-python = ">=3.10"
+dependencies = [
+  "generic-agent-runtime @ git+ssh://<git-host>/<org>/GenericAgent.git@v0.1.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["custom_tools*"]

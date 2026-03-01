@@ -64,6 +64,13 @@ junit.xml
 *.err
 
 # -----------------------------
+# Generated office artifacts safety net
+# -----------------------------
+*.xlsx
+*.xlsm
+*.pptx
+
+# -----------------------------
 # Environment / secrets
 # -----------------------------
 .env
