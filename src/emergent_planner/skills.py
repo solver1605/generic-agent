@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List
+from typing import Iterable, List
 
 import yaml
 
@@ -13,6 +13,13 @@ from .models import SkillMeta
 
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
+
+
+def normalize_skill_key(name: str) -> str:
+    raw = (name or "").strip().lower()
+    if not raw:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
 
 
 def find_project_root(start: Path = Path.cwd()) -> Path:
@@ -42,6 +49,18 @@ def _skill_files_under_root(root: Path) -> List[Path]:
     return sorted([p for p in root.rglob("SKILL.md") if p.is_file()])
 
 
+def _dedupe_paths(paths: Iterable[Path]) -> List[Path]:
+    seen = set()
+    out: List[Path] = []
+    for p in sorted(paths):
+        k = p.resolve().as_posix()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    return out
+
+
 def _discover_skill_files(search_root: Path) -> List[Path]:
     """
     Discover SKILL.md files with project-root awareness.
@@ -50,7 +69,6 @@ def _discover_skill_files(search_root: Path) -> List[Path]:
     - Scan search_root recursively when it exists.
     - Also scan all `.skills` directories recursively from project root.
     """
-    # If caller passes an explicit non-.skills directory, respect that scope.
     if search_root.exists() and search_root.name != ".skills":
         return _skill_files_under_root(search_root)
 
@@ -63,16 +81,24 @@ def _discover_skill_files(search_root: Path) -> List[Path]:
     for p in sorted(project_root.rglob(".skills")):
         if p.is_dir():
             out.extend(_skill_files_under_root(p))
-    # Deduplicate while preserving deterministic order.
-    seen = set()
-    deduped: List[Path] = []
-    for p in sorted(out):
-        k = p.resolve().as_posix()
-        if k in seen:
+
+    return _dedupe_paths(out)
+
+
+def _parse_skill_files(skill_files: List[Path], *, include_body: bool) -> List[SkillMeta]:
+    skills: List[SkillMeta] = []
+    for skill_file in skill_files:
+        try:
+            text = skill_file.read_text(encoding="utf-8")
+            sk = parse_skill_md(text, skill_file)
+        except Exception:
+            # Skip invalid SKILL.md files outside the skill contract.
             continue
-        seen.add(k)
-        deduped.append(p)
-    return deduped
+        if not include_body:
+            sk.body = None  # registry only; body loaded on-demand via load_skill tool
+        skills.append(sk)
+    skills.sort(key=lambda s: s.path.as_posix())
+    return skills
 
 
 def parse_skill_md(text: str, path: Path) -> SkillMeta:
@@ -97,19 +123,33 @@ def discover_skills(skills_root: Path = Path(".skills"), *, include_body: bool =
     - If `skills_root` does not exist, fallback scans `.skills` directories
       recursively from project root.
     """
-    skills: List[SkillMeta] = []
-    for skill_file in _discover_skill_files(skills_root):
-        try:
-            text = skill_file.read_text(encoding="utf-8")
-            sk = parse_skill_md(text, skill_file)
-        except Exception:
-            # Skip invalid SKILL.md files outside the skill contract.
-            continue
-        if not include_body:
-            sk.body = None  # registry only; body loaded on-demand via load_skill tool
-        skills.append(sk)
-    skills.sort(key=lambda s: s.path.as_posix())
-    return skills
+    return _parse_skill_files(_discover_skill_files(skills_root), include_body=include_body)
+
+
+def discover_skills_in_roots(
+    roots: List[Path],
+    *,
+    include_body: bool = False,
+    strict_scope: bool = True,
+) -> List[SkillMeta]:
+    """
+    Discover skills across explicit roots.
+
+    - strict_scope=True: scan only listed roots recursively.
+    - strict_scope=False: if roots yield no files, fallback to project-wide discovery.
+    """
+    paths: List[Path] = []
+    for root in roots or []:
+        p = Path(root).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        paths.extend(_skill_files_under_root(p))
+
+    deduped = _dedupe_paths(paths)
+    if not deduped and not strict_scope:
+        deduped = _discover_skill_files(Path(".skills"))
+
+    return _parse_skill_files(deduped, include_body=include_body)
 
 
 # ---------------------------------------------------------------------------

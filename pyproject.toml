@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "generic-agent-runtime"
+version = "0.1.0"
+description = "Reusable GenericAgent runtime package"
+requires-python = ">=3.10"
+dependencies = [
+  "langgraph>=0.2",
+  "langchain-core>=0.3",
+  "langchain-google-genai>=2.0",
+  "langchain-openai>=0.2",
+  "pydantic>=2.0",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0",
+  "streamlit>=1.36",
+  "rich>=13.0",
+  "openpyxl>=3.1",
+  "python-pptx>=0.6.23",
+]
+
+[project.scripts]
+generic-agent = "emergent_planner.cli:main"
+generic-agent-ui = "emergent_planner.ui_launcher:main"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "twine>=5.1.1",
+]
+ui = [
+  "streamlit>=1.36",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["emergent_planner*", "src*"]

@@ -1,5 +1,6 @@
 default_model_card: gemini_flash_fast
 default_policy_profile: balanced
+default_agent_profile: default
 
 model_cards:
   - id: gemini_flash_fast
@@ -118,3 +119,44 @@ subagents:
       writing: [read_file, read_file_range, search_web]
     denylist: [write_file, verify_with_user, spawn_subagents]
     permitted_overrides: [search_web, python_repl, read_file, read_file_range]
+
+tool_catalog:
+  allow_module_prefixes: [emergent_planner, src.emergent_planner, custom_tools]
+  custom_imports: []
+
+agent_profiles:
+  - id: default
+    description: Legacy-compatible default profile.
+    model_card_id: gemini_flash_fast
+    policy_profile_id: balanced
+    prompts:
+      strategy: merge
+      disable_cards: []
+      cards: []
+    tools:
+      allow: []
+      deny: []
+    skills:
+      roots: [.skills]
+      allowlist: []
+      denylist: []
+
+  - id: research_assistant
+    description: Research-oriented profile with focused tools and skills.
+    model_card_id: gemini_flash_reasoning
+    policy_profile_id: deep_research
+    prompts:
+      strategy: merge
+      disable_cards: [guidelines]
+      cards:
+        - name: guidelines
+          tags: [core]
+          priority: 10
+          file: prompts/research_guidelines.md
+    tools:
+      allow: [load_skill, search_web, spawn_subagents, verify_with_user, read_file, read_file_range]
+      deny: [python_repl]
+    skills:
+      roots: [.skills, services/research/.skills]
+      allowlist: [deep-research]
+      denylist: []

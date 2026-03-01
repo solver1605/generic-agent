@@ -232,3 +232,100 @@ policy_profiles:
         finally:
             if p.exists():
                 p.unlink()
+
+    def test_default_config_contains_default_agent_profile(self):
+        cfg = default_agent_config()
+        self.assertTrue(cfg.agent_profiles)
+        self.assertEqual(cfg.default_agent_profile, "default")
+        prof = cfg.get_agent_profile()
+        self.assertEqual(prof.id, "default")
+
+    def test_load_agent_config_legacy_autowrap_profile(self):
+        p = Path("/tmp/test_agent_config_legacy_wrap.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+default_policy_profile: balanced
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.default_agent_profile, "default")
+            self.assertEqual(len(cfg.agent_profiles), 1)
+            prof = cfg.get_agent_profile("default")
+            self.assertEqual(prof.model_card_id, "card_a")
+            self.assertEqual(prof.policy_profile_id, "balanced")
+            self.assertEqual(prof.skills.roots, [".skills"])
+            self.assertEqual(prof.skills.denylist, [])
+        finally:
+            if p.exists():
+                p.unlink()
+
+    def test_load_agent_config_with_multiple_agent_profiles(self):
+        p = Path("/tmp/test_agent_config_profiles.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+default_policy_profile: balanced
+default_agent_profile: researcher
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+tool_catalog:
+  allow_module_prefixes: [src.emergent_planner, custom_tools]
+  custom_imports: [custom_tools.research:build_tools]
+agent_profiles:
+  - id: default
+    model_card_id: card_a
+    policy_profile_id: balanced
+    skills:
+      roots: [.skills]
+      allowlist: []
+  - id: researcher
+    description: Research profile
+    model_card_id: card_a
+    policy_profile_id: deep_research
+    prompts:
+      strategy: merge
+      disable_cards: [guidelines]
+      cards:
+        - name: guidelines
+          tags: [core]
+          priority: 10
+          text: custom guidelines
+    tools:
+      allow: [load_skill, search_web]
+      deny: [python_repl]
+    skills:
+      roots: [.skills, services/research/.skills]
+      allowlist: [deep-research]
+      denylist: [internal-only-skill]
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.default_agent_profile, "researcher")
+            self.assertEqual(cfg.get_agent_profile("researcher").policy_profile_id, "deep_research")
+            self.assertEqual(cfg.get_agent_profile("researcher").tools.allow, ["load_skill", "search_web"])
+            self.assertEqual(
+                cfg.get_agent_profile("researcher").skills.roots,
+                [".skills", "services/research/.skills"],
+            )
+            self.assertEqual(
+                cfg.get_agent_profile("researcher").skills.denylist,
+                ["internal-only-skill"],
+            )
+            self.assertEqual(
+                cfg.tool_catalog.custom_imports,
+                ["custom_tools.research:build_tools"],
+            )
+        finally:
+            if p.exists():
+                p.unlink()

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -114,6 +114,52 @@ class PolicyProfileConfig:
 
 
 @dataclass
+class PromptCardConfig:
+    name: str
+    tags: List[str] = field(default_factory=list)
+    priority: int = 50
+    text: Optional[str] = None
+    file: Optional[str] = None
+
+
+@dataclass
+class PromptConfig:
+    strategy: Literal["merge", "replace"] = "merge"
+    cards: List[PromptCardConfig] = field(default_factory=list)
+    disable_cards: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ToolCatalogConfig:
+    custom_imports: List[str] = field(default_factory=list)
+    allow_module_prefixes: List[str] = field(default_factory=lambda: ["emergent_planner", "src.emergent_planner", "custom_tools"])
+
+
+@dataclass
+class ProfileToolPolicyConfig:
+    allow: List[str] = field(default_factory=list)
+    deny: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SkillsProfileConfig:
+    roots: List[str] = field(default_factory=lambda: [".skills"])
+    allowlist: List[str] = field(default_factory=list)
+    denylist: List[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentProfileConfig:
+    id: str
+    description: str = ""
+    model_card_id: Optional[str] = None
+    policy_profile_id: Optional[str] = None
+    prompts: PromptConfig = field(default_factory=PromptConfig)
+    tools: ProfileToolPolicyConfig = field(default_factory=ProfileToolPolicyConfig)
+    skills: SkillsProfileConfig = field(default_factory=SkillsProfileConfig)
+
+
+@dataclass
 class AgentConfig:
     model_cards: List[ModelCard]
     default_model_card: str
@@ -121,6 +167,9 @@ class AgentConfig:
     subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
     policy_profiles: List[PolicyProfileConfig] = field(default_factory=list)
     default_policy_profile: str = "balanced"
+    tool_catalog: ToolCatalogConfig = field(default_factory=ToolCatalogConfig)
+    agent_profiles: List[AgentProfileConfig] = field(default_factory=list)
+    default_agent_profile: str = "default"
 
     def get_model_card(self, model_card_id: Optional[str] = None) -> ModelCard:
         selected = model_card_id or self.default_model_card
@@ -137,6 +186,14 @@ class AgentConfig:
                 return profile
         available = ", ".join(p.id for p in self.policy_profiles)
         raise ValueError(f"Unknown policy profile '{selected}'. Available: {available}")
+
+    def get_agent_profile(self, profile_id: Optional[str] = None) -> AgentProfileConfig:
+        selected = profile_id or self.default_agent_profile
+        for profile in self.agent_profiles:
+            if profile.id == selected:
+                return profile
+        available = ", ".join(p.id for p in self.agent_profiles)
+        raise ValueError(f"Unknown agent profile '{selected}'. Available: {available}")
 
 
 def _default_policy_profiles() -> List[PolicyProfileConfig]:
@@ -210,7 +267,27 @@ def _default_policy_profiles() -> List[PolicyProfileConfig]:
     ]
 
 
+def _default_agent_profiles(default_model_card: str, default_policy_profile: str) -> List[AgentProfileConfig]:
+    return [
+        AgentProfileConfig(
+            id="default",
+            description="Legacy-compatible default generic agent profile.",
+            model_card_id=default_model_card,
+            policy_profile_id=default_policy_profile,
+            prompts=PromptConfig(strategy="merge"),
+            tools=ProfileToolPolicyConfig(),
+            skills=SkillsProfileConfig(
+                roots=[".skills"],
+                allowlist=[],
+                denylist=[],
+            ),
+        )
+    ]
+
+
 def default_agent_config() -> AgentConfig:
+    default_model_card = "gemini_flash_fast"
+    default_policy_profile = "balanced"
     return AgentConfig(
         model_cards=[
             ModelCard(
@@ -228,7 +305,7 @@ def default_agent_config() -> AgentConfig:
                 thinking_budget=1024,
             ),
         ],
-        default_model_card="gemini_flash_fast",
+        default_model_card=default_model_card,
         search=SearchConfig(
             providers=[
                 SearchProviderConfig(
@@ -284,30 +361,101 @@ def default_agent_config() -> AgentConfig:
             ),
         ),
         policy_profiles=_default_policy_profiles(),
-        default_policy_profile="balanced",
+        default_policy_profile=default_policy_profile,
+        tool_catalog=ToolCatalogConfig(
+            custom_imports=[],
+            allow_module_prefixes=["emergent_planner", "src.emergent_planner", "custom_tools"],
+        ),
+        agent_profiles=_default_agent_profiles(default_model_card, default_policy_profile),
+        default_agent_profile="default",
     )
+
+
+def _parse_prompt_config(raw_prompt: Dict[str, Any]) -> PromptConfig:
+    strategy = str(raw_prompt.get("strategy", "merge")).strip().lower() or "merge"
+    if strategy not in {"merge", "replace"}:
+        strategy = "merge"
+
+    cards: List[PromptCardConfig] = []
+    for card_raw in raw_prompt.get("cards", []) or []:
+        if not isinstance(card_raw, dict):
+            continue
+        name = str(card_raw.get("name", "")).strip()
+        if not name:
+            continue
+        cards.append(
+            PromptCardConfig(
+                name=name,
+                tags=[str(t).strip() for t in (card_raw.get("tags", []) or []) if str(t).strip()],
+                priority=int(card_raw.get("priority", 50)),
+                text=card_raw.get("text"),
+                file=card_raw.get("file"),
+            )
+        )
+
+    return PromptConfig(
+        strategy=strategy,
+        cards=cards,
+        disable_cards=[str(x).strip() for x in (raw_prompt.get("disable_cards", []) or []) if str(x).strip()],
+    )
+
+
+def _parse_agent_profiles(raw: Dict[str, Any], *, fallback_model: str, fallback_policy: str) -> tuple[List[AgentProfileConfig], str]:
+    profiles_raw = raw.get("agent_profiles", []) or []
+    profile_list: List[AgentProfileConfig] = []
+
+    for item in profiles_raw:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("id", "")).strip()
+        if not pid:
+            continue
+
+        prompts = _parse_prompt_config(item.get("prompts", {}) or {})
+        tools_raw = item.get("tools", {}) or {}
+        skills_raw = item.get("skills", {}) or {}
+
+        profile_list.append(
+            AgentProfileConfig(
+                id=pid,
+                description=str(item.get("description", "") or "").strip(),
+                model_card_id=(str(item.get("model_card_id")).strip() if item.get("model_card_id") is not None else None),
+                policy_profile_id=(
+                    str(item.get("policy_profile_id")).strip() if item.get("policy_profile_id") is not None else None
+                ),
+                prompts=prompts,
+                tools=ProfileToolPolicyConfig(
+                    allow=[str(x).strip() for x in (tools_raw.get("allow", []) or []) if str(x).strip()],
+                    deny=[str(x).strip() for x in (tools_raw.get("deny", []) or []) if str(x).strip()],
+                ),
+                skills=SkillsProfileConfig(
+                    roots=[str(x).strip() for x in (skills_raw.get("roots", [".skills"]) or [".skills"]) if str(x).strip()],
+                    allowlist=[str(x).strip() for x in (skills_raw.get("allowlist", []) or []) if str(x).strip()],
+                    denylist=[str(x).strip() for x in (skills_raw.get("denylist", []) or []) if str(x).strip()],
+                ),
+            )
+        )
+
+    if not profile_list:
+        profile_list = _default_agent_profiles(fallback_model, fallback_policy)
+        return profile_list, "default"
+
+    default_agent_profile = str(raw.get("default_agent_profile", profile_list[0].id)).strip() or profile_list[0].id
+    if default_agent_profile not in {p.id for p in profile_list}:
+        default_agent_profile = profile_list[0].id
+    return profile_list, default_agent_profile
 
 
 def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
     """
     Load agent config from YAML if present; otherwise return defaults.
-
-    Expected YAML shape:
-      default_model_card: gemini_flash_fast
-      model_cards:
-        - id: gemini_flash_fast
-          provider: google_genai
-          model_name: models/gemini-2.0-flash
-          temperature: 0
-          thinking_budget: 0
-          max_output_tokens: 2048
-          model_kwargs:
-            top_p: 0.95
     """
     if not path.exists():
         return default_agent_config()
 
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    base = default_agent_config()
+
     cards_raw = raw.get("model_cards", []) or []
     cards: List[ModelCard] = []
     for item in cards_raw:
@@ -324,11 +472,9 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         )
 
     if not cards:
-        base = default_agent_config()
         cards = base.model_cards
 
     default_id = str(raw.get("default_model_card") or cards[0].id)
-    base = default_agent_config()
 
     search_raw = raw.get("search", {}) or {}
     providers_raw = search_raw.get("providers", []) or []
@@ -454,6 +600,23 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         profile_list = list(base.policy_profiles)
         default_policy_profile = base.default_policy_profile
 
+    tool_catalog_raw = raw.get("tool_catalog", {}) or {}
+    tool_catalog = ToolCatalogConfig(
+        custom_imports=[str(x).strip() for x in (tool_catalog_raw.get("custom_imports", []) or []) if str(x).strip()],
+        allow_module_prefixes=[
+            str(x).strip()
+            for x in (tool_catalog_raw.get("allow_module_prefixes", base.tool_catalog.allow_module_prefixes) or [])
+            if str(x).strip()
+        ]
+        or list(base.tool_catalog.allow_module_prefixes),
+    )
+
+    agent_profiles, default_agent_profile = _parse_agent_profiles(
+        raw,
+        fallback_model=default_id,
+        fallback_policy=default_policy_profile,
+    )
+
     return AgentConfig(
         model_cards=cards,
         default_model_card=default_id,
@@ -461,6 +624,9 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         subagents=subagents,
         policy_profiles=profile_list,
         default_policy_profile=default_policy_profile,
+        tool_catalog=tool_catalog,
+        agent_profiles=agent_profiles,
+        default_agent_profile=default_agent_profile,
     )
 
 

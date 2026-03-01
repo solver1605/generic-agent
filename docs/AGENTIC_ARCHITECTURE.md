@@ -267,6 +267,16 @@ Clean extension seams:
 
 ## 14. Operational Characteristics and Constraints
 
+### YAML Agent Profiles
+
+The runtime now supports `agent_profiles` in YAML for specialization without code edits:
+- prompt override strategy (`merge`/`replace`)
+- profile tool policy (allow/deny) over built-in + custom-imported tool catalog
+- profile-scoped skill discovery roots and optional skill allowlist
+
+Profile selection is exposed in CLI (`--agent-profile`) and Streamlit sidebar (`Agent profile`).
+Legacy configs without `agent_profiles` are auto-wrapped into `default` profile behavior.
+
 1. Prompt-policy dependence:
 - planning/HITL discipline mostly relies on prompt compliance rather than strict controller enforcement.
 
@@ -319,4 +329,3 @@ flowchart TD
 3. Add explicit retries/backoff policies for transient tool/LLM failures.
 4. Validate skill payload schema before activation to harden against malformed tool output.
 5. Add persistence abstraction for artifacts if deploying across ephemeral workers.
-

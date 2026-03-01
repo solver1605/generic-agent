@@ -128,6 +128,15 @@ Most common extension seams:
 - Add graph nodes/routers for stricter control logic
 - Improve skill ranking/discovery heuristics
 
+## YAML Agent Profiles
+
+Runtime now supports profile-based specialization through config:
+- profile-selectable prompts (`merge` or `replace`)
+- profile-selectable tools (allow/deny over built-ins + safe custom imports)
+- profile-scoped skills roots and optional skill allowlist
+
+See `docs/AGENT_PROFILES.md` for schema and examples.
+
 ## Current Design Tradeoffs
 
 1. Planning discipline is mostly prompt-enforced, not hard-enforced.
