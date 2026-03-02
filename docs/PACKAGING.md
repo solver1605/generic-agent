@@ -17,6 +17,8 @@ Legacy `src.emergent_planner` remains available for one minor release and emits 
 
 ```bash
 pip install "generic-agent-runtime @ git+ssh://<git-host>/<org>/GenericAgent.git@v0.1.0"
+# Optional Google ADK runtime support:
+pip install "generic-agent-runtime[adk] @ git+ssh://<git-host>/<org>/GenericAgent.git@v0.1.0"
 ```
 
 ## Console entrypoints

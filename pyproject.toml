@@ -33,6 +33,9 @@ dev = [
 ui = [
   "streamlit>=1.36",
 ]
+adk = [
+  "google-adk>=0.1.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

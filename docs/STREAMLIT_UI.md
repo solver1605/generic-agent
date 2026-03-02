@@ -57,6 +57,7 @@ The app provides two tabs:
   - `Model name override`
   - `Thinking budget override`
 - Cards are loaded from `agent_config.yaml` if present; otherwise built-in defaults are used.
+- Sidebar also exposes `Runtime engine` (`langgraph` or `google_adk`) when allowed by config.
 
 ## Tool Controls
 

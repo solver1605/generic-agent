@@ -66,6 +66,7 @@ You extend behavior using:
 Main schema docs:
 - `docs/AGENT_PROFILES.md`
 - `docs/PACKAGING.md`
+- `docs/ADK_MIGRATION.md`
 
 ## 6) Create a specialized agent package
 
@@ -91,6 +92,9 @@ Your YAML profile controls:
 
 - `model_card_id`
 - `policy_profile_id`
+- `runtime.default_engine`, `runtime.allowed_engines`
+- `agent_profiles[].runtime_engine` (optional profile override)
+- `adk.enabled`, `adk.timeout_s`, `adk.max_steps` (for Google ADK runtime)
 - `streamlit.app_name` and `streamlit.page_title` (UI branding)
 - `prompts` (merge/replace cards)
 - `tools.allow` and `tools.deny`
@@ -100,6 +104,7 @@ Run with explicit config/profile:
 
 ```bash
 uv run generic-agent --config /path/to/specialized_agent.yaml --agent-profile researcher
+uv run generic-agent --config /path/to/specialized_agent.yaml --agent-profile researcher --runtime-engine google_adk
 uv run generic-agent-ui --config /path/to/specialized_agent.yaml
 ```
 
@@ -197,6 +202,10 @@ Compatibility:
 
 `Streamlit config not picked`
 - Launch with explicit `--config` on `generic-agent-ui`.
+
+`google_adk runtime selected but unavailable`
+- Enable `adk.enabled: true` in YAML and install ADK extras:
+  `uv sync --extra adk` or `pip install 'generic-agent-runtime[adk]'`.
 
 ## 13) Suggested day-1 checklist
 

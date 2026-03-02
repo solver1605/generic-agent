@@ -44,6 +44,7 @@ agent_profiles:
   - id: research_assistant
     model_card_id: gemini_flash_reasoning
     policy_profile_id: deep_research
+    runtime_engine: google_adk
     prompts:
       strategy: merge
       disable_cards: [guidelines]
@@ -63,6 +64,7 @@ agent_profiles:
 Fields:
 - `model_card_id`: optional override for default model card
 - `policy_profile_id`: optional override for default runtime policy profile
+- `runtime_engine`: optional runtime override (`langgraph` or `google_adk`)
 - `prompts.strategy`: `merge` or `replace`
 - `prompts.cards`: inline text or `file` reference (exactly one)
 - `tools.allow`: optional tool allowlist (empty means all catalog tools)
@@ -84,6 +86,26 @@ Fields:
 4. Apply session toggles/CLI tool switches.
 
 If zero tools remain, runtime fails with a clear error.
+
+## Runtime engine selection
+
+You can control runtime engine globally and per-profile:
+
+```yaml
+runtime:
+  default_engine: langgraph
+  allowed_engines: [langgraph, google_adk]
+
+adk:
+  enabled: false
+  timeout_s: 30.0
+  max_steps: 64
+```
+
+Selection precedence:
+1. CLI/UI override
+2. `agent_profiles[].runtime_engine`
+3. `runtime.default_engine`
 
 ## Skill scope behavior
 

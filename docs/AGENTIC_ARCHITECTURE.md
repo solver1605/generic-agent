@@ -5,7 +5,7 @@
 This document explains how the Emergent Planner agent works end-to-end, based on the implementation in `src/emergent_planner/` and `main.py`.
 
 It covers:
-- runtime topology (LangGraph state machine)
+- runtime topology (dual runtime adapters with LangGraph default)
 - state model and data contracts
 - prompt/context assembly and budgeting
 - tool execution and skill activation
@@ -17,7 +17,8 @@ It covers:
 ## 2. High-Level Architecture
 
 The system is a **graph-driven, tool-augmented conversational agent** built on:
-- LangGraph for orchestration and checkpointed execution
+- runtime adapters (`langgraph`, `google_adk`) behind a shared engine contract
+- LangGraph as current default orchestrator/checkpointer
 - LangChain messages/tools for model and tool interoperability
 - a policy-driven context manager for prompt composition
 - explicit runtime/memory state for continuity and control
@@ -30,7 +31,8 @@ Primary composition path:
 5. Periodically summarize history into memory to control context growth.
 6. Repeat until no tool call is emitted.
 
-Core builder: `build_app(...)` in `src/emergent_planner/graph.py`.
+Core graph builder: `build_app(...)` in `src/emergent_planner/graph.py`.
+Runtime factory: `build_runtime_app(...)` in `src/emergent_planner/runtime/factory.py`.
 
 ## 3. Runtime Topology (State Graph)
 

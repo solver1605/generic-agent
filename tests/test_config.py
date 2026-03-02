@@ -137,6 +137,49 @@ model_cards:
         self.assertIn("deep_research", ids)
         self.assertEqual(cfg.default_policy_profile, "balanced")
 
+    def test_default_config_contains_runtime_defaults(self):
+        cfg = default_agent_config()
+        self.assertEqual(cfg.runtime.default_engine, "langgraph")
+        self.assertIn("langgraph", cfg.runtime.allowed_engines)
+        self.assertIn("google_adk", cfg.runtime.allowed_engines)
+        self.assertFalse(cfg.adk.enabled)
+
+    def test_load_agent_config_parses_runtime_and_adk(self):
+        p = Path("/tmp/test_agent_config_runtime.yaml")
+        p.write_text(
+            """
+default_model_card: card_a
+model_cards:
+  - id: card_a
+    provider: google_genai
+    model_name: models/gemini-2.0-flash
+runtime:
+  default_engine: google_adk
+  allowed_engines: [langgraph, google_adk]
+adk:
+  enabled: true
+  timeout_s: 42
+  max_steps: 77
+  model: models/gemini-2.5-flash
+agent_profiles:
+  - id: default
+    runtime_engine: google_adk
+""".strip(),
+            encoding="utf-8",
+        )
+        try:
+            cfg = load_agent_config(p)
+            self.assertEqual(cfg.runtime.default_engine, "google_adk")
+            self.assertEqual(cfg.runtime.allowed_engines, ["langgraph", "google_adk"])
+            self.assertTrue(cfg.adk.enabled)
+            self.assertEqual(cfg.adk.timeout_s, 42)
+            self.assertEqual(cfg.adk.max_steps, 77)
+            self.assertEqual(cfg.adk.model, "models/gemini-2.5-flash")
+            self.assertEqual(cfg.get_agent_profile("default").runtime_engine, "google_adk")
+        finally:
+            if p.exists():
+                p.unlink()
+
     def test_load_agent_config_parses_subagent_section(self):
         p = Path("/tmp/test_agent_config_sub.yaml")
         p.write_text(

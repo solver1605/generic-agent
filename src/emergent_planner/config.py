@@ -136,6 +136,20 @@ class ToolCatalogConfig:
 
 
 @dataclass
+class RuntimeEngineConfig:
+    default_engine: Literal["langgraph", "google_adk"] = "langgraph"
+    allowed_engines: List[str] = field(default_factory=lambda: ["langgraph", "google_adk"])
+
+
+@dataclass
+class ADKConfig:
+    enabled: bool = False
+    timeout_s: float = 30.0
+    max_steps: int = 64
+    model: Optional[str] = None
+
+
+@dataclass
 class StreamlitUIConfig:
     app_name: str = "Emergent Planner"
     page_title: str = "Emergent Planner UI"
@@ -160,6 +174,7 @@ class AgentProfileConfig:
     description: str = ""
     model_card_id: Optional[str] = None
     policy_profile_id: Optional[str] = None
+    runtime_engine: Optional[Literal["langgraph", "google_adk"]] = None
     prompts: PromptConfig = field(default_factory=PromptConfig)
     tools: ProfileToolPolicyConfig = field(default_factory=ProfileToolPolicyConfig)
     skills: SkillsProfileConfig = field(default_factory=SkillsProfileConfig)
@@ -173,6 +188,8 @@ class AgentConfig:
     subagents: SubAgentConfig = field(default_factory=SubAgentConfig)
     policy_profiles: List[PolicyProfileConfig] = field(default_factory=list)
     default_policy_profile: str = "balanced"
+    runtime: RuntimeEngineConfig = field(default_factory=RuntimeEngineConfig)
+    adk: ADKConfig = field(default_factory=ADKConfig)
     streamlit: StreamlitUIConfig = field(default_factory=StreamlitUIConfig)
     tool_catalog: ToolCatalogConfig = field(default_factory=ToolCatalogConfig)
     agent_profiles: List[AgentProfileConfig] = field(default_factory=list)
@@ -281,6 +298,7 @@ def _default_agent_profiles(default_model_card: str, default_policy_profile: str
             description="Legacy-compatible default generic agent profile.",
             model_card_id=default_model_card,
             policy_profile_id=default_policy_profile,
+            runtime_engine=None,
             prompts=PromptConfig(strategy="merge"),
             tools=ProfileToolPolicyConfig(),
             skills=SkillsProfileConfig(
@@ -369,6 +387,16 @@ def default_agent_config() -> AgentConfig:
         ),
         policy_profiles=_default_policy_profiles(),
         default_policy_profile=default_policy_profile,
+        runtime=RuntimeEngineConfig(
+            default_engine="langgraph",
+            allowed_engines=["langgraph", "google_adk"],
+        ),
+        adk=ADKConfig(
+            enabled=False,
+            timeout_s=30.0,
+            max_steps=64,
+            model=None,
+        ),
         tool_catalog=ToolCatalogConfig(
             custom_imports=[],
             allow_module_prefixes=["emergent_planner", "src.emergent_planner", "custom_tools"],
@@ -429,6 +457,11 @@ def _parse_agent_profiles(raw: Dict[str, Any], *, fallback_model: str, fallback_
                 model_card_id=(str(item.get("model_card_id")).strip() if item.get("model_card_id") is not None else None),
                 policy_profile_id=(
                     str(item.get("policy_profile_id")).strip() if item.get("policy_profile_id") is not None else None
+                ),
+                runtime_engine=(
+                    str(item.get("runtime_engine", "")).strip()
+                    if str(item.get("runtime_engine", "")).strip() in {"langgraph", "google_adk"}
+                    else None
                 ),
                 prompts=prompts,
                 tools=ProfileToolPolicyConfig(
@@ -545,6 +578,31 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
     subagents.max_wall_time_s_limit = max(float(subagents.max_wall_time_s_limit), float(subagents.max_wall_time_s_default))
     subagents.max_retries_limit = max(int(subagents.max_retries_limit), int(subagents.max_retries_default))
 
+    runtime_raw = raw.get("runtime", {}) or {}
+    runtime_cfg = RuntimeEngineConfig(
+        default_engine=(
+            str(runtime_raw.get("default_engine", base.runtime.default_engine)).strip()
+            if str(runtime_raw.get("default_engine", base.runtime.default_engine)).strip() in {"langgraph", "google_adk"}
+            else base.runtime.default_engine
+        ),
+        allowed_engines=[
+            str(x).strip()
+            for x in (runtime_raw.get("allowed_engines", base.runtime.allowed_engines) or [])
+            if str(x).strip() in {"langgraph", "google_adk"}
+        ]
+        or list(base.runtime.allowed_engines),
+    )
+    if runtime_cfg.default_engine not in set(runtime_cfg.allowed_engines):
+        runtime_cfg.default_engine = runtime_cfg.allowed_engines[0]
+
+    adk_raw = raw.get("adk", {}) or {}
+    adk_cfg = ADKConfig(
+        enabled=bool(adk_raw.get("enabled", base.adk.enabled)),
+        timeout_s=float(adk_raw.get("timeout_s", base.adk.timeout_s)),
+        max_steps=int(adk_raw.get("max_steps", base.adk.max_steps)),
+        model=(str(adk_raw.get("model")).strip() if adk_raw.get("model") is not None else base.adk.model),
+    )
+
     profiles_raw = raw.get("policy_profiles", []) or []
     base_profiles = {p.id: p for p in base.policy_profiles}
     profile_list: List[PolicyProfileConfig] = list(base.policy_profiles)
@@ -642,6 +700,8 @@ def load_agent_config(path: Path = Path("agent_config.yaml")) -> AgentConfig:
         subagents=subagents,
         policy_profiles=profile_list,
         default_policy_profile=default_policy_profile,
+        runtime=runtime_cfg,
+        adk=adk_cfg,
         streamlit=streamlit_cfg,
         tool_catalog=tool_catalog,
         agent_profiles=agent_profiles,

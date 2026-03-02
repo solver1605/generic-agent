@@ -171,6 +171,43 @@ class TestSubagents(TestCase):
         self.assertEqual(rec.results[0].turn_traces[0]["turn_index"], 1)
         self.assertEqual(len(rec.errors), 1)
 
+    def test_orchestrator_uses_parent_runtime_engine(self):
+        task = SubAgentTask(id="t1", title="Research", objective="Find A", expected_output="summary")
+
+        class _FailErr:
+            task_id = "t1"
+            code = "worker_execution_failed"
+            message = "boom"
+            retryable = False
+            attempts = 1
+
+        class _Fail:
+            error = _FailErr()
+
+        captured = {"runtime_engines": []}
+
+        def fake_run_worker_task_once(**kwargs):
+            captured["runtime_engines"].append(kwargs.get("runtime_engine"))
+            return None, _Fail()
+
+        with patch("src.emergent_planner.subagents.orchestrator.run_worker_task_once", side_effect=fake_run_worker_task_once), \
+             patch("src.emergent_planner.subagents.orchestrator.persist_task_artifact", return_value=Path("/tmp/a.json")):
+            run_subagents(
+                tasks=[task],
+                execution=SubAgentExecutionConfig(max_workers=1, max_worker_turns=3, max_wall_time_s=20, max_retries=0),
+                parent_state={
+                    "runtime": {
+                        "run_id": "p1",
+                        "enabled_tool_names": ["read_file", "search_web"],
+                        "runtime_engine": "langgraph",
+                    }
+                },
+                all_tools=[],
+                config_path=Path("/tmp/nonexistent-config.yaml"),
+            )
+
+        self.assertEqual(captured["runtime_engines"], ["langgraph"])
+
     def test_orchestrator_does_not_double_count_errors_on_parallel_timeout(self):
         t1 = SubAgentTask(id="t1", title="Research A", objective="Find A", expected_output="summary")
         t2 = SubAgentTask(id="t2", title="Research B", objective="Find B", expected_output="summary")

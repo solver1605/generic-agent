@@ -2,7 +2,7 @@
 
 ## What This System Is
 
-Emergent Planner is a **LangGraph-based, tool-using agent runtime**. It combines:
+Emergent Planner is a **dual-runtime, tool-using agent framework**. It combines:
 - a graph orchestrator (control flow)
 - policy-based prompt/context assembly
 - tool execution + skill loading
@@ -13,7 +13,8 @@ It is designed for iterative "think -> act -> integrate" execution until complet
 
 ## Core Runtime Loop
 
-Graph builder: `build_app(...)` in `src/emergent_planner/graph.py`
+Default graph builder: `build_app(...)` in `src/emergent_planner/graph.py`
+Runtime selector/factory: `build_runtime_app(...)` in `src/emergent_planner/runtime/factory.py`
 
 ```mermaid
 flowchart LR
@@ -161,3 +162,5 @@ See `docs/AGENT_PROFILES.md` for schema and examples.
 Emergent Planner is a **stateful execution graph** where each turn is:
 - **prepare context** -> **reason** -> **act with tools (optional)** -> **integrate** -> **repeat**,
 with **memory compression**, **human approval checkpoints**, and **deep telemetry** built in.
+
+During migration, the same runtime contract is available through both `langgraph` and `google_adk` engine adapters.

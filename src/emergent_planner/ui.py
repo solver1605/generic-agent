@@ -23,11 +23,10 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langgraph.types import Command
 
 from emergent_planner import (
     DEFAULT_TOOLS,
-    build_app,
+    build_runtime_app,
     build_prompt_lib_for_profile,
     discover_skills_in_roots,
 )
@@ -39,6 +38,7 @@ from emergent_planner.config import (
 from emergent_planner.skills import find_project_root
 from emergent_planner.tool_loader import build_tool_catalog, resolve_tools_for_profile
 from emergent_planner.tool_registry import tool_catalog, tool_name
+from emergent_planner.runtime.factory import resolve_runtime_engine
 from emergent_planner.utils import (
     _diff_states,
     _shallow_snapshot,
@@ -388,6 +388,7 @@ def _render_artifacts_view() -> None:
 def _build_runtime(
     config_path: str,
     agent_profile_id: str,
+    runtime_engine: str,
     model_card_id: str,
     policy_profile_id: str,
     skills_signature: str,
@@ -451,7 +452,7 @@ def _build_runtime(
         }
     )
 
-    app = build_app(
+    app = build_runtime_app(
         llm=llm_with_tools,
         prompt_lib=prompt_lib,
         skills_root=(skill_roots[0] if skill_roots else Path(".skills")),
@@ -459,6 +460,8 @@ def _build_runtime(
         tool_log_policy=tool_policy,
         summary_policy=summary_policy,
         tools=tools,
+        engine=runtime_engine,
+        cfg=cfg,
     )
 
     skills = discover_skills_in_roots(skill_roots, strict_scope=True)
@@ -473,6 +476,7 @@ def _build_runtime(
         "skills": skills,
         "agent_profile_id": agent_profile.id,
         "agent_profile_description": agent_profile.description,
+        "runtime_engine": runtime_engine,
         "model_card": card,
         "enabled_tool_names": [tool_name(t) for t in tools],
         "available_tool_names": available_tool_names,
@@ -520,6 +524,7 @@ def _init_session(runtime: Dict[str, Any]) -> None:
             "subagent_max_worker_turns": runtime["subagent_defaults"]["max_worker_turns"],
             "subagent_max_wall_time_s": runtime["subagent_defaults"]["max_wall_time_s"],
             "policy_profile_id": runtime["policy_profile_id"],
+            "runtime_engine": runtime.get("runtime_engine", "langgraph"),
         },
         "skills": runtime["skills"],
     }
@@ -540,14 +545,19 @@ def _append_step(full_state: Dict[str, Any]) -> None:
     st.session_state.last_snap = snap
 
 
-def _run_graph(input_obj: Any, runtime: Dict[str, Any]) -> None:
-    app = runtime["app"]
+def _run_graph(input_obj: Any, runtime: Dict[str, Any], *, resume_answer: Any | None = None) -> None:
+    runtime_engine = runtime["app"]
     config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
     interrupted = False
     final_state: Dict[str, Any] = st.session_state.current_state
 
-    for full_state in app.stream(input_obj, config=config, stream_mode="values"):
+    if resume_answer is None:
+        stream_iter = runtime_engine.stream(input_obj, config=config)
+    else:
+        stream_iter = runtime_engine.resume(resume_answer, config=config)
+
+    for full_state in stream_iter:
         _append_step(full_state)
         final_state = full_state
         payload = _extract_interrupt_payload(full_state)
@@ -867,7 +877,7 @@ def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
         submitted = st.form_submit_button("Submit and Continue")
 
     if submitted:
-        _run_graph(Command(resume=answer), runtime)
+        _run_graph(None, runtime, resume_answer=answer)
         st.rerun()
 
 
@@ -881,7 +891,7 @@ def _run_user_turn(prompt: str, runtime: Dict[str, Any]) -> None:
         "history": hist,
     }
 
-    _run_graph(next_state, runtime)
+    _run_graph(next_state, runtime, resume_answer=None)
 
 
 def _render_user_view(runtime: Dict[str, Any]) -> None:
@@ -964,6 +974,7 @@ def _reset_session() -> None:
         "pending_interrupt",
         "current_state",
         "agent_profile_id_ui",
+        "runtime_engine_ui",
         "enabled_tool_names_ui",
         "policy_profile_id_ui",
         "subagent_enabled_ui",
@@ -1088,6 +1099,28 @@ def main() -> None:
             key="agent_profile_id_ui",
         )
         selected_agent_profile = cfg.get_agent_profile(agent_profile_id)
+        try:
+            resolved_runtime_default = resolve_runtime_engine(
+                cfg=cfg,
+                profile_runtime_engine=getattr(selected_agent_profile, "runtime_engine", None),
+                explicit_runtime_engine=None,
+            )
+        except Exception:
+            resolved_runtime_default = "langgraph"
+        runtime_options = [e for e in list(cfg.runtime.allowed_engines or []) if e in {"langgraph", "google_adk"}]
+        if not runtime_options:
+            runtime_options = ["langgraph", "google_adk"]
+        current_runtime_engine = str(st.session_state.get("runtime_engine_ui", resolved_runtime_default))
+        if current_runtime_engine not in runtime_options:
+            current_runtime_engine = resolved_runtime_default if resolved_runtime_default in runtime_options else runtime_options[0]
+            st.session_state["runtime_engine_ui"] = current_runtime_engine
+        runtime_engine = st.selectbox(
+            "Runtime engine",
+            options=runtime_options,
+            index=runtime_options.index(current_runtime_engine),
+            key="runtime_engine_ui",
+            help="Switch between LangGraph and Google ADK runtime adapters.",
+        )
 
         card_ids = [c.id for c in cfg.model_cards]
         default_model_id = selected_agent_profile.model_card_id or cfg.default_model_card
@@ -1179,6 +1212,7 @@ def main() -> None:
         runtime = _build_runtime(
             config_path=config_path.as_posix(),
             agent_profile_id=agent_profile_id,
+            runtime_engine=runtime_engine,
             model_card_id=model_card_id,
             policy_profile_id=policy_profile_id,
             skills_signature=skills_sig,
@@ -1199,6 +1233,7 @@ def main() -> None:
         f"thinking_budget={runtime['model_card'].thinking_budget}"
     )
     st.sidebar.caption(f"Agent profile: {runtime['agent_profile_id']}")
+    st.sidebar.caption(f"Runtime engine: {runtime.get('runtime_engine', 'langgraph')}")
     if runtime.get("agent_profile_description"):
         st.sidebar.caption(str(runtime["agent_profile_description"]))
     st.sidebar.caption(f"Policy profile: {runtime['policy_profile_id']}")

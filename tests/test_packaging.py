@@ -35,9 +35,16 @@ class PackagingTests(unittest.TestCase):
 
         includes = data.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {}).get("include", [])
         self.assertIn("emergent_planner*", includes)
+        opt = data.get("project", {}).get("optional-dependencies", {})
+        self.assertIn("adk", opt)
 
     def test_public_namespace_import(self):
-        proc = self._run("import emergent_planner as ep; assert hasattr(ep, 'build_app'); print('ok')")
+        proc = self._run(
+            "import emergent_planner as ep; "
+            "assert hasattr(ep, 'build_app'); "
+            "assert hasattr(ep, 'build_runtime_app'); "
+            "print('ok')"
+        )
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("ok", proc.stdout)
 

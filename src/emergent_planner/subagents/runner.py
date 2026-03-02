@@ -11,10 +11,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from ..config import ModelCard, build_llm_from_model_card
-from ..graph import build_app
+from ..config import AgentConfig, ModelCard, build_llm_from_model_card
 from ..policies import BudgetPolicy, SummaryPolicy, ToolLogPolicy
 from ..prompts import make_default_prompt_lib
+from ..runtime.factory import build_runtime_app
 from ..utils import extract_tool_calls, normalize_content
 from .context import build_worker_initial_state
 from .types import SubAgentError, SubAgentTask
@@ -96,6 +96,8 @@ def run_worker_task_once(
     max_worker_turns: int,
     max_wall_time_s: float,
     google_api_key: str,
+    runtime_engine: str = "langgraph",
+    cfg: AgentConfig | None = None,
 ) -> WorkerRunOutcome:
     t0 = time.perf_counter()
     worker_run_id = f"{parent_run_id}:{request_id}:{task.id}:{task_index}:{uuid.uuid4().hex[:8]}"
@@ -107,13 +109,15 @@ def run_worker_task_once(
     try:
         llm = build_llm_from_model_card(model_card, google_api_key=google_api_key)
         llm_with_tools = llm.bind_tools(worker_tools)
-        app = build_app(
+        app = build_runtime_app(
             llm=llm_with_tools,
             prompt_lib=make_default_prompt_lib(),
             budget_policy=budget_policy,
             tool_log_policy=tool_log_policy,
             summary_policy=summary_policy,
             tools=worker_tools,
+            engine=runtime_engine,
+            cfg=cfg,
         )
     except Exception as e:
         err = SubAgentError(task_id=task.id, code="worker_init_failed", message=f"{type(e).__name__}: {e}", retryable=False)
@@ -145,7 +149,7 @@ def run_worker_task_once(
     max_prompt_msgs = max(8, int(budget_policy.max_skills_top_k) + 6)
 
     try:
-        for st in app.stream(init_state, config=config, stream_mode="values"):
+        for st in app.stream(init_state, config=config):
             last_state = st
             runtime = st.get("runtime", {}) or {}
             turns = int(runtime.get("turn_index", 0))

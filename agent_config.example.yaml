@@ -2,6 +2,16 @@ default_model_card: gemini_flash_fast
 default_policy_profile: balanced
 default_agent_profile: default
 
+runtime:
+  default_engine: langgraph
+  allowed_engines: [langgraph, google_adk]
+
+adk:
+  enabled: false
+  timeout_s: 30.0
+  max_steps: 64
+  model: null
+
 streamlit:
   app_name: Emergent Planner
   page_title: Emergent Planner UI
@@ -133,6 +143,7 @@ agent_profiles:
     description: Legacy-compatible default profile.
     model_card_id: gemini_flash_fast
     policy_profile_id: balanced
+    runtime_engine: null
     prompts:
       strategy: merge
       disable_cards: []
@@ -149,6 +160,7 @@ agent_profiles:
     description: Research-oriented profile with focused tools and skills.
     model_card_id: gemini_flash_reasoning
     policy_profile_id: deep_research
+    runtime_engine: null
     prompts:
       strategy: merge
       disable_cards: [guidelines]

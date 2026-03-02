@@ -18,6 +18,7 @@ from ..config import (
     load_agent_config,
     resolve_runtime_policies,
 )
+from ..runtime.factory import resolve_runtime_engine
 from ..tool_registry import select_tools, tool_name
 from .artifacts import persist_task_artifact
 from .policy import resolve_worker_tool_names
@@ -124,6 +125,11 @@ def run_subagents(
         )
 
     resolved_exec = _resolve_execution(cfg, parent_runtime, execution)
+    resolved_runtime_engine = resolve_runtime_engine(
+        cfg=cfg,
+        profile_runtime_engine=None,
+        explicit_runtime_engine=str(parent_runtime.get("runtime_engine", "")).strip() or None,
+    )
     model_card = _resolve_model_card(cfg, parent_runtime)
     budget_policy, tool_log_policy, summary_policy, resolved_profile_id = resolve_runtime_policies(
         cfg,
@@ -191,6 +197,8 @@ def run_subagents(
                 max_worker_turns=resolved_exec.max_worker_turns,
                 max_wall_time_s=max(1.0, deadline - now),
                 google_api_key=google_api_key,
+                runtime_engine=resolved_runtime_engine,
+                cfg=cfg,
             )
 
             if succ is not None:
@@ -340,6 +348,7 @@ def run_subagents(
         "max_workers_used": min(resolved_exec.max_workers, len(parallel_items)) if parallel_items else 1,
         "elapsed_ms": int((time.perf_counter() - start) * 1000),
         "policy_profile_id": resolved_profile_id,
+        "runtime_engine": resolved_runtime_engine,
     }
 
     summary = _build_summary(results, errors)

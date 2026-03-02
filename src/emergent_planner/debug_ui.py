@@ -355,10 +355,22 @@ def record_run(
     prev_snap: Dict[str, Any] = {}
     idx = 0
     interrupts_seen = 0
+    has_runtime_resume = bool(getattr(app, "resume", None))
 
-    def _consume_stream(input_obj):
+    def _consume_stream(input_obj, *, resume_answer: Optional[ResumeAnswer] = None):
         nonlocal idx, prev_snap, interrupts_seen
-        for full_state in app.stream(input_obj, config=config, stream_mode="values"):
+        if resume_answer is None:
+            if has_runtime_resume:
+                iterator = app.stream(input_obj, config=config)
+            else:
+                iterator = app.stream(input_obj, config=config, stream_mode="values")
+        else:
+            if has_runtime_resume:
+                iterator = app.resume(resume_answer, config=config)
+            else:
+                iterator = app.stream(Command(resume=resume_answer), config=config, stream_mode="values")
+
+        for full_state in iterator:
             snap = _shallow_snapshot(full_state, keys)
             d = _diff_states(prev_snap, snap) if idx > 0 else {"note": "initial snapshot"}
             steps.append(Step(idx=idx, state=snap, diff=d))
@@ -390,7 +402,7 @@ def record_run(
     # 2) If interrupted and we have an answer, resume loop
     while payload is not None and resume is not False:
         answer = resume
-        payload, resume = _consume_stream(Command(resume=answer))
+        payload, resume = _consume_stream(None, resume_answer=answer)
 
     return steps
 

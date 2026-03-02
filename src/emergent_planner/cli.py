@@ -19,11 +19,10 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.types import Command
 
 from emergent_planner import (
     DEFAULT_TOOLS,
-    build_app,
+    build_runtime_app,
     build_prompt_lib_for_profile,
     discover_skills_in_roots,
 )
@@ -35,6 +34,7 @@ from emergent_planner.config import (
 from emergent_planner.skills import find_project_root
 from emergent_planner.tool_loader import build_tool_catalog, resolve_tools_for_profile
 from emergent_planner.tool_registry import tool_catalog, tool_name
+from emergent_planner.runtime.factory import resolve_runtime_engine
 from emergent_planner.utils import extract_tool_calls, get_history_from_state, normalize_content
 
 load_dotenv()
@@ -254,8 +254,9 @@ def _print_new_messages(messages: List[Any], *, show_tools: bool) -> None:
 
 def _run_graph(
     *,
-    app,
+    runtime_engine,
     input_obj: Any,
+    resume_answer: Any | None,
     state: Dict[str, Any],
     thread_id: str,
     prev_hist_len: int,
@@ -265,7 +266,12 @@ def _run_graph(
     final_state = state
     pending_interrupt = None
 
-    for full_state in app.stream(input_obj, config=config, stream_mode="values"):
+    if resume_answer is None:
+        stream_iter = runtime_engine.stream(input_obj, config=config)
+    else:
+        stream_iter = runtime_engine.resume(resume_answer, config=config)
+
+    for full_state in stream_iter:
         final_state = full_state
         if debug:
             rt = dict(full_state.get("runtime", {}) or {})
@@ -293,6 +299,12 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", default="", help="Model name override.")
     parser.add_argument("--thinking-budget", type=int, default=None, help="Thinking budget override.")
     parser.add_argument("--policy-profile", default="", help="Policy profile id override.")
+    parser.add_argument(
+        "--runtime-engine",
+        default="",
+        choices=["", "langgraph", "google_adk"],
+        help="Runtime engine override.",
+    )
     parser.add_argument("--skills-root", default="", help="Optional override for skills root path.")
     parser.add_argument("--tools", default="", help="Comma-separated tool names to enable.")
     parser.add_argument("--disable-tools", default="", help="Comma-separated tool names to disable.")
@@ -416,7 +428,12 @@ def main() -> None:
         skills = [s for s in skills if _normalize_skill_key(getattr(s, "name", "")) not in denied]
 
     prompt_lib = build_prompt_lib_for_profile(cfg, agent_profile, config_dir=config_dir)
-    app = build_app(
+    resolved_runtime_engine = resolve_runtime_engine(
+        cfg=cfg,
+        profile_runtime_engine=getattr(agent_profile, "runtime_engine", None),
+        explicit_runtime_engine=args.runtime_engine.strip() or None,
+    )
+    runtime_engine = build_runtime_app(
         llm=llm_with_tools,
         prompt_lib=prompt_lib,
         skills_root=(resolved_skill_roots[0] if resolved_skill_roots else Path(".skills")),
@@ -424,6 +441,8 @@ def main() -> None:
         tool_log_policy=tool_policy,
         summary_policy=summary_policy,
         tools=tools,
+        engine=resolved_runtime_engine,
+        cfg=cfg,
     )
 
     run_id = str(uuid.uuid4())
@@ -446,6 +465,7 @@ def main() -> None:
             "subagent_max_worker_turns": subagent_max_turns,
             "subagent_max_wall_time_s": subagent_max_wall_time,
             "policy_profile_id": resolved_profile_id,
+            "runtime_engine": resolved_runtime_engine,
         },
         "skills": skills,
     }
@@ -459,6 +479,7 @@ def main() -> None:
         f"Agent profile: {agent_profile.id}\n"
         f"Model: {model_card.id} ({model_card.model_name})\n"
         f"Policy profile: {resolved_profile_id}\n"
+        f"Runtime engine: {resolved_runtime_engine}\n"
         f"Skills roots: {', '.join([p.as_posix() for p in resolved_skill_roots])}\n"
         f"Skills allowlist: {', '.join(allowlist_norm) if allowlist_norm else '(none)'}\n"
         f"Skills denylist: {', '.join(denylist_norm) if denylist_norm else '(none)'}\n"
@@ -474,8 +495,9 @@ def main() -> None:
     if initial_prompt:
         state["history"] = [HumanMessage(content=initial_prompt)]
         state, pending_interrupt, prev_hist_len, new_messages = _run_graph(
-            app=app,
+            runtime_engine=runtime_engine,
             input_obj=state,
+            resume_answer=None,
             state=state,
             thread_id=thread_id,
             prev_hist_len=0,
@@ -490,8 +512,9 @@ def main() -> None:
         if pending_interrupt is not None:
             answer = _prompt_interrupt(pending_interrupt)
             state, pending_interrupt, prev_hist_len, new_messages = _run_graph(
-                app=app,
-                input_obj=Command(resume=answer),
+                runtime_engine=runtime_engine,
+                input_obj=None,
+                resume_answer=answer,
                 state=state,
                 thread_id=thread_id,
                 prev_hist_len=prev_hist_len,
@@ -515,6 +538,7 @@ def main() -> None:
             print(
                 f"turn={rt.get('turn_index', 0)} "
                 f"policy={rt.get('policy_profile_id')} "
+                f"runtime_engine={rt.get('runtime_engine')} "
                 f"subagents_enabled={rt.get('subagent_enabled')} "
                 f"workers={rt.get('subagent_max_workers')} "
                 f"turns={rt.get('subagent_max_worker_turns')} "
@@ -545,8 +569,9 @@ def main() -> None:
         hist.append(HumanMessage(content=raw))
         state = {**state, "history": hist}
         state, pending_interrupt, prev_hist_len, new_messages = _run_graph(
-            app=app,
+            runtime_engine=runtime_engine,
             input_obj=state,
+            resume_answer=None,
             state=state,
             thread_id=thread_id,
             prev_hist_len=prev_hist_len,
