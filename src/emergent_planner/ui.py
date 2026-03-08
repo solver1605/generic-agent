@@ -36,6 +36,19 @@ from emergent_planner.config import (
     load_agent_config,
     resolve_runtime_policies,
 )
+from emergent_planner.data_models import (
+    DataModelValidationError,
+    build_data_model_catalog,
+    build_record,
+    ensure_runtime_data_model_state,
+    load_persisted_records,
+    normalize_user_id,
+    persist_record,
+    resolve_data_models_for_profile,
+    select_form_fields,
+    serialize_registry_meta,
+    validate_instance,
+)
 from emergent_planner.skills import find_project_root
 from emergent_planner.tool_loader import build_tool_catalog, resolve_tools_for_profile
 from emergent_planner.tool_registry import tool_catalog, tool_name
@@ -66,6 +79,17 @@ TOOL_GROUPS: List[tuple[str, set[str]]] = [
     ("Core File Tools", {"read_file", "read_file_range", "write_file"}),
     ("Office Document Tools", {"write_excel_file", "create_pptx_deck"}),
     ("Reasoning and Search", {"python_repl", "search_web"}),
+    (
+        "Data Models",
+        {
+            "list_data_models",
+            "get_data_model",
+            "upsert_data_model",
+            "request_data_model_fields",
+            "get_user_profile",
+            "upsert_user_profile",
+        },
+    ),
     ("Agent Orchestration", {"load_skill", "spawn_subagents", "verify_with_user"}),
 ]
 
@@ -80,7 +104,7 @@ def _normalize_interrupt_payload(raw: Any) -> Optional[Dict[str, Any]]:
 
     # Common case: already a dict.
     if isinstance(raw, dict):
-        return {
+        base = {
             "type": raw.get("type") or raw.get("kind") or "confirm",
             "reason": raw.get("reason", ""),
             "question": raw.get("question", "Please provide input to continue."),
@@ -88,6 +112,10 @@ def _normalize_interrupt_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "context": raw.get("context"),
             "default": raw.get("default"),
         }
+        for k, v in raw.items():
+            if k not in base:
+                base[k] = v
+        return base
 
     # Some runtimes surface a tuple/list containing Interrupt objects.
     if isinstance(raw, (list, tuple)) and len(raw) > 0:
@@ -195,6 +223,59 @@ def _resolve_skills_roots(skills_roots: List[str]) -> List[Path]:
         seen.add(k)
         deduped.append(p)
     return deduped
+
+
+def _resolve_data_model_registry(cfg, agent_profile) -> Dict[str, Any]:
+    models = resolve_data_models_for_profile(build_data_model_catalog(cfg), agent_profile)
+    meta = serialize_registry_meta(models)
+    return {
+        "models": {str(m.id): m for m in models},
+        "meta": meta,
+        "ids": sorted(meta.keys()),
+    }
+
+
+def _upsert_data_model_in_session(model_id: str, payload: Dict[str, Any], *, merge: bool = True) -> tuple[bool, str]:
+    cur = dict(st.session_state.get("current_state", {}) or {})
+    rt = ensure_runtime_data_model_state(dict(cur.get("runtime", {}) or {}))
+    cfg_path = Path(str(rt.get("config_path", "agent_config.yaml"))).expanduser()
+    cfg_dir_raw = str(rt.get("config_dir", "") or "").strip()
+    if not cfg_path.is_absolute() and cfg_dir_raw:
+        cfg_path = (Path(cfg_dir_raw).expanduser() / cfg_path).resolve()
+    else:
+        cfg_path = cfg_path.resolve()
+    cfg = load_agent_config(cfg_path)
+    profile_id = str(rt.get("agent_profile_id", cfg.default_agent_profile)).strip() or cfg.default_agent_profile
+    profile = cfg.get_agent_profile(profile_id)
+    reg = _resolve_data_model_registry(cfg, profile)
+    model_map = dict(reg["models"])
+    meta_map = dict(reg["meta"])
+    if model_id not in model_map:
+        return False, f"Unknown model '{model_id}'."
+
+    values = dict(rt.get("data_model_values", {}) or {})
+    existing = dict(values.get(model_id, {}) or {})
+    incoming = dict(payload or {})
+    candidate = {**existing, **incoming} if merge else incoming
+
+    try:
+        validated = validate_instance(model_map[model_id], candidate, strict=True)
+    except DataModelValidationError as e:
+        return False, str(e)
+
+    record = build_record(model_id, validated, meta_map.get(model_id, {}))
+    user_id = normalize_user_id(rt.get("active_user_id", "default"))
+    path = persist_record(record, user_id=user_id)
+
+    values[model_id] = dict(record.data)
+    updated = dict(rt.get("data_model_last_updated", {}) or {})
+    updated[model_id] = record.updated_at
+    rt["data_model_values"] = values
+    rt["data_model_last_updated"] = updated
+    rt["data_model_meta"] = meta_map
+    cur["runtime"] = rt
+    st.session_state.current_state = cur
+    return True, f"Saved model '{model_id}' -> {path.as_posix()}"
 
 
 def _skills_signature(skills_roots: List[Path]) -> str:
@@ -395,11 +476,7 @@ def _build_runtime(
     thinking_budget_override: Optional[int],
     enabled_tool_names: tuple[str, ...],
 ) -> Dict[str, Any]:
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
-    if not api_key:
-        raise EnvironmentError("GOOGLE_API_KEY is not set. Add it to your environment or .env file.")
-
-    cfg_path = Path(config_path)
+    cfg_path = Path(config_path).expanduser().resolve()
     cfg = load_agent_config(cfg_path)
     config_dir = cfg_path.resolve().parent
     subcfg = _resolve_subagent_cfg(cfg)
@@ -424,7 +501,7 @@ def _build_runtime(
         extra_allow=list(enabled_tool_names),
     )
 
-    base_llm = build_llm_from_model_card(card, google_api_key=api_key)
+    base_llm = build_llm_from_model_card(card, env=os.environ)
     if not tools:
         raise ValueError("No tools are enabled. Enable at least one tool in the sidebar.")
     llm_with_tools = base_llm.bind_tools(tools)
@@ -435,6 +512,7 @@ def _build_runtime(
         policy_profile_id,
     )
     profile_meta = cfg.get_policy_profile(resolved_profile_id)
+    data_models_reg = _resolve_data_model_registry(cfg, agent_profile)
     skill_roots = _resolve_skills_roots(list(agent_profile.skills.roots or [".skills"]))
     allowlist_norm = sorted(
         {
@@ -471,6 +549,8 @@ def _build_runtime(
     return {
         "app": app,
         "skills": skills,
+        "config_path": cfg_path.as_posix(),
+        "config_dir": config_dir.as_posix(),
         "agent_profile_id": agent_profile.id,
         "agent_profile_description": agent_profile.description,
         "model_card": card,
@@ -479,6 +559,8 @@ def _build_runtime(
         "skills_roots_resolved": [p.as_posix() for p in skill_roots],
         "skills_allowlist_norm": allowlist_norm,
         "skills_denylist_norm": denylist_norm,
+        "data_model_meta": dict(data_models_reg["meta"]),
+        "data_model_ids": list(data_models_reg["ids"]),
         "subagent_defaults": {
             "enabled": subcfg["enabled"],
             "max_workers": subcfg["max_workers_default"],
@@ -501,6 +583,12 @@ def _init_session(runtime: Dict[str, Any]) -> None:
     st.session_state.last_snap = {}
     st.session_state.pending_interrupt = None
     st.session_state.session_started_at = time.time()
+    user_id = "default"
+    persisted_values, persisted_updated = load_persisted_records(
+        list(runtime.get("data_model_ids", []) or []),
+        user_id=user_id,
+    )
+
     st.session_state.current_state = {
         "history": [],
         "memory": {},
@@ -510,11 +598,17 @@ def _init_session(runtime: Dict[str, Any]) -> None:
             "model_card_id": runtime["model_card"].id,
             "model_name": runtime["model_card"].model_name,
             "thinking_budget": runtime["model_card"].thinking_budget,
+            "config_path": runtime.get("config_path", "agent_config.yaml"),
+            "config_dir": runtime.get("config_dir", Path(".").resolve().as_posix()),
             "agent_profile_id": runtime["agent_profile_id"],
             "enabled_tool_names": runtime["enabled_tool_names"],
             "skills_roots_resolved": list(runtime.get("skills_roots_resolved", [])),
             "skills_allowlist_norm": list(runtime.get("skills_allowlist_norm", [])),
             "skills_denylist_norm": list(runtime.get("skills_denylist_norm", [])),
+            "active_user_id": user_id,
+            "data_model_values": persisted_values,
+            "data_model_meta": dict(runtime.get("data_model_meta", {})),
+            "data_model_last_updated": persisted_updated,
             "subagent_enabled": runtime["subagent_defaults"]["enabled"],
             "subagent_max_workers": runtime["subagent_defaults"]["max_workers"],
             "subagent_max_worker_turns": runtime["subagent_defaults"]["max_worker_turns"],
@@ -546,6 +640,9 @@ def _run_graph(input_obj: Any, runtime: Dict[str, Any]) -> None:
 
     interrupted = False
     final_state: Dict[str, Any] = st.session_state.current_state
+    started = time.time()
+    status_box = st.empty()
+    status_box.info("Running agent...")
 
     for full_state in app.stream(input_obj, config=config, stream_mode="values"):
         _append_step(full_state)
@@ -559,10 +656,12 @@ def _run_graph(input_obj: Any, runtime: Dict[str, Any]) -> None:
     st.session_state.current_state = final_state
     if not interrupted:
         st.session_state.pending_interrupt = None
+    elapsed = int(time.time() - started)
+    status_box.success(f"Run completed in {elapsed}s")
 
 
 def _apply_runtime_controls(state: Dict[str, Any]) -> Dict[str, Any]:
-    rt = dict(state.get("runtime", {}) or {})
+    rt = ensure_runtime_data_model_state(dict(state.get("runtime", {}) or {}))
     rt["subagent_enabled"] = bool(st.session_state.get("subagent_enabled_ui", rt.get("subagent_enabled", True)))
     rt["subagent_max_workers"] = int(st.session_state.get("subagent_max_workers_ui", rt.get("subagent_max_workers", 4)))
     rt["subagent_max_worker_turns"] = int(
@@ -841,6 +940,8 @@ def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
     context = payload.get("context", "") or ""
     choices = payload.get("choices", []) or []
     default = payload.get("default", "")
+    model_id = str(payload.get("model_id", "") or "")
+    field_schema = list(payload.get("field_schema", []) or [])
 
     st.warning("Action required to continue")
     with st.container(border=True):
@@ -853,7 +954,68 @@ def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
             st.markdown(context)
 
     with st.form("interrupt_form", clear_on_submit=False):
-        if kind == "pick_one" and choices:
+        if kind == "model_form" and field_schema:
+            current_rt = ensure_runtime_data_model_state(
+                dict((st.session_state.get("current_state", {}) or {}).get("runtime", {}) or {})
+            )
+            current_vals = dict((current_rt.get("data_model_values", {}) or {}).get(model_id, {}) or {})
+            answer_values: Dict[str, Any] = {}
+            parse_errors: List[str] = []
+            for field in field_schema:
+                if not isinstance(field, dict):
+                    continue
+                name = str(field.get("name", "") or "").strip()
+                if not name:
+                    continue
+                widget = str(field.get("widget", "text") or "text")
+                desc = str(field.get("description", "") or "")
+                enum_vals = list(field.get("enum", []) or [])
+                required = bool(field.get("required", False))
+                key = f"interrupt_model_field_{model_id}_{name}"
+                default_val = current_vals.get(name, field.get("default"))
+
+                if enum_vals:
+                    options = [str(x) for x in enum_vals]
+                    idx = options.index(str(default_val)) if str(default_val) in options else 0
+                    val = st.selectbox(f"{name}{' *' if required else ''}", options=options, index=idx, key=key)
+                elif widget == "checkbox":
+                    val = st.checkbox(f"{name}{' *' if required else ''}", value=bool(default_val), key=key)
+                elif widget == "number":
+                    if isinstance(default_val, int):
+                        val = st.number_input(f"{name}{' *' if required else ''}", value=int(default_val), step=1, key=key)
+                    else:
+                        val = st.number_input(
+                            f"{name}{' *' if required else ''}",
+                            value=float(default_val or 0.0),
+                            step=0.1,
+                            key=key,
+                        )
+                elif widget == "json":
+                    raw = st.text_area(
+                        f"{name}{' *' if required else ''}",
+                        value=json.dumps(default_val, ensure_ascii=False, indent=2)
+                        if isinstance(default_val, (dict, list))
+                        else str(default_val or ""),
+                        key=key,
+                    )
+                    try:
+                        val = json.loads(raw) if raw.strip() else None
+                    except Exception:
+                        val = raw
+                        parse_errors.append(f"Field '{name}' could not be parsed as JSON.")
+                else:
+                    val = st.text_input(
+                        f"{name}{' *' if required else ''}",
+                        value=str(default_val or ""),
+                        key=key,
+                    )
+                if desc:
+                    st.caption(desc)
+                answer_values[name] = val
+            if parse_errors:
+                st.caption("; ".join(parse_errors))
+            answer = {"model_id": model_id, "values": answer_values}
+        elif kind == "pick_one" and choices:
             answer = st.selectbox("Select one", options=choices, index=0)
         elif kind == "pick_many" and choices:
             answer = st.multiselect("Select one or more", options=choices)
@@ -867,7 +1029,8 @@ def _render_interrupt_card(runtime: Dict[str, Any]) -> None:
         submitted = st.form_submit_button("Submit and Continue")
 
     if submitted:
-        _run_graph(Command(resume=answer), runtime)
+        with st.spinner("Running agent..."):
+            _run_graph(Command(resume=answer), runtime)
         st.rerun()
 
 
@@ -881,7 +1044,8 @@ def _run_user_turn(prompt: str, runtime: Dict[str, Any]) -> None:
         "history": hist,
     }
 
-    _run_graph(next_state, runtime)
+    with st.spinner("Running agent..."):
+        _run_graph(next_state, runtime)
 
 
 def _render_user_view(runtime: Dict[str, Any]) -> None:
@@ -964,6 +1128,8 @@ def _reset_session() -> None:
         "pending_interrupt",
         "current_state",
         "agent_profile_id_ui",
+        "model_provider_ui",
+        "model_card_id_ui",
         "enabled_tool_names_ui",
         "policy_profile_id_ui",
         "subagent_enabled_ui",
@@ -976,6 +1142,10 @@ def _reset_session() -> None:
         "artifact_selected_path_ui",
         "artifact_selected_path_tab_ui",
         "artifact_sidebar_preview_ui",
+        "user_profile_name_ui",
+        "user_profile_birth_ui",
+        "user_profile_place_ui",
+        "data_model_selected_ui",
     ]:
         if k in st.session_state:
             del st.session_state[k]
@@ -1000,6 +1170,76 @@ def _render_loaded_skills_sidebar(runtime: Dict[str, Any]) -> None:
                 st.caption(desc)
             if path:
                 st.code(path, language="text")
+
+
+def _render_data_models_sidebar() -> None:
+    cur = dict(st.session_state.get("current_state", {}) or {})
+    rt = ensure_runtime_data_model_state(dict(cur.get("runtime", {}) or {}))
+    meta_map = dict(rt.get("data_model_meta", {}) or {})
+    values = dict(rt.get("data_model_values", {}) or {})
+    updated = dict(rt.get("data_model_last_updated", {}) or {})
+
+    st.sidebar.subheader("User Profile")
+    user_profile = dict(values.get("user_profile", {}) or {})
+    name_val = st.sidebar.text_input("Name", value=str(user_profile.get("name", "") or ""), key="user_profile_name_ui")
+    birth_val = st.sidebar.text_input(
+        "Birth details",
+        value=str(user_profile.get("birth_details", "") or ""),
+        key="user_profile_birth_ui",
+    )
+    place_val = st.sidebar.text_input("Place", value=str(user_profile.get("place", "") or ""), key="user_profile_place_ui")
+    if st.sidebar.button("Save User Profile"):
+        ok, msg = _upsert_data_model_in_session(
+            "user_profile",
+            {"name": name_val, "birth_details": birth_val, "place": place_val},
+            merge=True,
+        )
+        if ok:
+            st.sidebar.success(msg)
+        else:
+            st.sidebar.error(msg)
+
+    if "user_profile" in updated:
+        st.sidebar.caption(f"User profile updated: {updated['user_profile']}")
+
+    st.sidebar.subheader("Data Models")
+    if not meta_map:
+        st.sidebar.caption("No data models registered for this profile.")
+        return
+
+    all_ids = sorted(meta_map.keys())
+    show_id = st.sidebar.selectbox("Model", options=all_ids, key="data_model_selected_ui")
+    model_meta = dict(meta_map.get(show_id, {}) or {})
+    model_data = dict(values.get(show_id, {}) or {})
+    required = list(model_meta.get("required_fields", []) or [])
+    missing = []
+    for f in required:
+        val = model_data.get(f)
+        if f not in model_data or val is None or (isinstance(val, str) and not val.strip()):
+            missing.append(f)
+    status = "complete" if not missing else f"partial (missing: {', '.join(missing)})"
+    st.sidebar.caption(f"Status: {status}")
+    if show_id in updated:
+        st.sidebar.caption(f"Updated: {updated[show_id]}")
+
+    raw = st.sidebar.text_area(
+        "Model JSON",
+        value=json.dumps(model_data, ensure_ascii=False, indent=2),
+        key=f"data_model_json_{show_id}",
+        height=180,
+    )
+    if st.sidebar.button("Save Model JSON"):
+        try:
+            payload = json.loads(raw) if raw.strip() else {}
+        except Exception as e:
+            st.sidebar.error(f"Invalid JSON: {e}")
+            payload = None
+        if payload is not None:
+            ok, msg = _upsert_data_model_in_session(show_id, payload, merge=False)
+            if ok:
+                st.sidebar.success(msg)
+            else:
+                st.sidebar.error(msg)
 
 
 def _tool_group_for_name(name: str) -> str:
@@ -1089,10 +1329,47 @@ def main() -> None:
         )
         selected_agent_profile = cfg.get_agent_profile(agent_profile_id)
 
-        card_ids = [c.id for c in cfg.model_cards]
+        model_cards = list(cfg.model_cards or [])
+        if not model_cards:
+            st.error("No model cards configured.")
+            st.stop()
+        card_by_id = {c.id: c for c in model_cards}
+        providers = sorted({str(c.provider).strip() for c in model_cards if str(c.provider).strip()})
+        if not providers:
+            st.error("No model providers configured.")
+            st.stop()
+
         default_model_id = selected_agent_profile.model_card_id or cfg.default_model_card
-        default_idx = card_ids.index(default_model_id) if default_model_id in card_ids else 0
-        model_card_id = st.selectbox("Model card", options=card_ids, index=default_idx)
+        default_card = card_by_id.get(default_model_id) or model_cards[0]
+        default_provider = str(default_card.provider).strip() or providers[0]
+
+        current_provider = str(st.session_state.get("model_provider_ui", default_provider)).strip() or default_provider
+        if current_provider not in providers:
+            current_provider = default_provider if default_provider in providers else providers[0]
+            st.session_state["model_provider_ui"] = current_provider
+        model_provider = st.selectbox(
+            "Model provider",
+            options=providers,
+            index=providers.index(current_provider),
+            key="model_provider_ui",
+            help="Filter model cards by provider.",
+        )
+
+        provider_card_ids = [c.id for c in model_cards if str(c.provider).strip() == model_provider]
+        if not provider_card_ids:
+            st.error(f"No model cards available for provider '{model_provider}'.")
+            st.stop()
+
+        current_model_id = str(st.session_state.get("model_card_id_ui", default_model_id)).strip() or default_model_id
+        if current_model_id not in provider_card_ids:
+            current_model_id = default_model_id if default_model_id in provider_card_ids else provider_card_ids[0]
+            st.session_state["model_card_id_ui"] = current_model_id
+        model_card_id = st.selectbox(
+            "Model card",
+            options=provider_card_ids,
+            index=provider_card_ids.index(current_model_id),
+            key="model_card_id_ui",
+        )
         profile_ids = [p.id for p in cfg.policy_profiles] or [cfg.default_policy_profile]
         default_policy_id = selected_agent_profile.policy_profile_id or cfg.default_policy_profile
         current_profile = str(st.session_state.get("policy_profile_id_ui", default_policy_id))
@@ -1108,6 +1385,9 @@ def main() -> None:
         )
 
         selected = cfg.get_model_card(model_card_id)
+        api_env = str(selected.api_key_env or "").strip()
+        if api_env:
+            st.caption(f"Selected model API key env: `{api_env}`")
         model_name = st.text_input("Model name override", value=selected.model_name)
         thinking_budget = st.number_input(
             "Thinking budget override",
@@ -1162,7 +1442,10 @@ def main() -> None:
                 "subcfg": subcfg,
             },
         )
-        st.caption("Set GOOGLE_API_KEY in .env or environment before running.")
+        st.caption(
+            "Set provider API key env var in .env/environment "
+            "(e.g., GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, QWEN_API_KEY)."
+        )
         if st.button("Refresh Runtime Cache"):
             _build_runtime.clear()
             _reset_session()
@@ -1211,6 +1494,7 @@ def main() -> None:
     )
     st.sidebar.caption("Skills roots: " + ", ".join(runtime.get("skills_roots_resolved", [])))
     _render_loaded_skills_sidebar(runtime)
+    _render_data_models_sidebar()
     _render_artifacts_sidebar()
 
     user_tab, debug_tab, artifacts_tab = st.tabs(["User View", "Debug View", "Artifacts"])

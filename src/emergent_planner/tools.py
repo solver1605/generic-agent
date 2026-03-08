@@ -32,6 +32,18 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import interrupt
 
 from .config import load_agent_config
+from .data_models import (
+    DataModelValidationError,
+    build_data_model_catalog,
+    build_record,
+    ensure_runtime_data_model_state,
+    normalize_user_id,
+    persist_record,
+    resolve_data_models_for_profile,
+    select_form_fields,
+    serialize_registry_meta,
+    validate_instance,
+)
 from .models import VerifyRequest
 from .search.engine import SearchRequest, run_search
 from .skills import discover_skills, discover_skills_in_roots
@@ -54,6 +66,111 @@ def _normalize_skill_key(name: str) -> str:
     if not raw:
         return ""
     return re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+
+
+def _resolve_data_model_registry(
+    state: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    state = state or {}
+    runtime = ensure_runtime_data_model_state(dict(state.get("runtime", {}) or {}))
+    cfg_path = Path(str(runtime.get("config_path", "agent_config.yaml"))).expanduser()
+    cfg_dir_raw = str(runtime.get("config_dir", "") or "").strip()
+    if not cfg_path.is_absolute() and cfg_dir_raw:
+        cfg_path = (Path(cfg_dir_raw).expanduser() / cfg_path).resolve()
+    else:
+        cfg_path = cfg_path.resolve()
+    cfg = load_agent_config(cfg_path)
+    profile_id = str(runtime.get("agent_profile_id", cfg.default_agent_profile)).strip() or cfg.default_agent_profile
+    profile = cfg.get_agent_profile(profile_id)
+    catalog = build_data_model_catalog(cfg)
+    models = resolve_data_models_for_profile(catalog, profile)
+    model_map = {str(m.id): m for m in models}
+    meta_map = serialize_registry_meta(models)
+    return runtime, model_map, meta_map, {"cfg_path": cfg_path.as_posix(), "profile_id": profile.id}
+
+
+def _data_model_error_payload(
+    *,
+    model_id: Optional[str],
+    status: str,
+    error: str,
+    available_models: Optional[List[str]] = None,
+    profile_id: Optional[str] = None,
+    config_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "__tool": "data_model_error",
+        "status": status,
+        "error": str(error),
+    }
+    if model_id:
+        out["model_id"] = model_id
+    if available_models is not None:
+        out["available_models"] = sorted(set(str(x) for x in available_models if str(x)))
+    if profile_id:
+        out["profile_id"] = profile_id
+    if config_path:
+        out["config_path"] = config_path
+    if status in {"unknown_model", "registry_error"}:
+        out["hint"] = (
+            "Call list_data_models first and ensure this model is registered in "
+            "`data_model_catalog.custom_imports` and allowed by profile `data_models.allow/deny`."
+        )
+    return out
+
+
+def _apply_data_model_upsert(
+    *,
+    model_id: str,
+    payload: Dict[str, Any],
+    merge: bool,
+    state: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    try:
+        runtime, model_map, meta_map, info = _resolve_data_model_registry(state)
+    except Exception as e:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="registry_error",
+            error=f"Failed to resolve data model registry: {e}",
+        )
+    if model_id not in model_map:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="unknown_model",
+            error=f"Unknown data model '{model_id}'.",
+            available_models=sorted(model_map.keys()),
+            profile_id=info.get("profile_id"),
+            config_path=info.get("cfg_path"),
+        )
+
+    values = dict(runtime.get("data_model_values", {}) or {})
+    current = dict(values.get(model_id, {}) or {})
+    incoming = dict(payload or {})
+    candidate = {**current, **incoming} if merge else incoming
+
+    try:
+        validated = validate_instance(model_map[model_id], candidate, strict=True)
+    except DataModelValidationError as e:
+        return {
+            "__tool": "data_model_upsert_error",
+            "model_id": model_id,
+            "error": str(e),
+            "status": "invalid",
+        }
+
+    record = build_record(model_id, validated, meta_map.get(model_id, {}))
+    user_id = normalize_user_id(runtime.get("active_user_id", "default"))
+    path = persist_record(record, user_id=user_id)
+    return {
+        "__tool": "data_model_upsert",
+        "model_id": model_id,
+        "record": record.to_dict(),
+        "path": path.as_posix(),
+        "status": "ok",
+        "source": "tool_upsert",
+        "profile_id": info["profile_id"],
+    }
 
 
 def _require_module(module_name: str, pip_name: str):
@@ -524,6 +641,271 @@ def search_web(
 
 
 @tool
+def list_data_models(
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    List registered data models and current completion status.
+    """
+    try:
+        runtime, model_map, meta_map, _ = _resolve_data_model_registry(state)
+    except Exception as e:
+        runtime = ensure_runtime_data_model_state(dict((state or {}).get("runtime", {}) or {}))
+        fallback_meta = dict(runtime.get("data_model_meta", {}) or {})
+        model_ids = sorted(fallback_meta.keys())
+        models_out = []
+        for model_id in model_ids:
+            meta = dict(fallback_meta.get(model_id, {}) or {})
+            models_out.append(
+                {
+                    "model_id": model_id,
+                    "description": meta.get("description", ""),
+                    "required_fields": list(meta.get("required_fields", []) or []),
+                    "missing_required": [],
+                    "status": "unknown",
+                    "updated_at": None,
+                }
+            )
+        return {
+            "__tool": "data_model_error",
+            "status": "registry_error",
+            "error": f"Failed to resolve data model registry: {e}",
+            "active_user_id": normalize_user_id(runtime.get("active_user_id", "default")),
+            "models": models_out,
+            "count": len(models_out),
+        }
+    values = dict(runtime.get("data_model_values", {}) or {})
+    updated = dict(runtime.get("data_model_last_updated", {}) or {})
+
+    models_out: List[Dict[str, Any]] = []
+    for model_id in sorted(model_map.keys()):
+        meta = dict(meta_map.get(model_id, {}) or {})
+        data = dict(values.get(model_id, {}) or {})
+        required = list(meta.get("required_fields", []) or [])
+        missing = []
+        for f in required:
+            val = data.get(f)
+            if f not in data or val is None or (isinstance(val, str) and not val.strip()):
+                missing.append(f)
+        models_out.append(
+            {
+                "model_id": model_id,
+                "description": meta.get("description", ""),
+                "required_fields": required,
+                "missing_required": missing,
+                "status": "complete" if not missing else "partial",
+                "updated_at": updated.get(model_id),
+            }
+        )
+
+    return {
+        "active_user_id": normalize_user_id(runtime.get("active_user_id", "default")),
+        "models": models_out,
+        "count": len(models_out),
+    }
+
+
+@tool
+def get_data_model(
+    model_id: str,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Get current values and validation completeness for one data model instance.
+    """
+    try:
+        runtime, model_map, meta_map, info = _resolve_data_model_registry(state)
+    except Exception as e:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="registry_error",
+            error=f"Failed to resolve data model registry: {e}",
+        )
+    if model_id not in model_map:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="unknown_model",
+            error=f"Unknown data model '{model_id}'.",
+            available_models=sorted(model_map.keys()),
+            profile_id=info.get("profile_id"),
+            config_path=info.get("cfg_path"),
+        )
+
+    values = dict(runtime.get("data_model_values", {}) or {})
+    updated = dict(runtime.get("data_model_last_updated", {}) or {})
+    data = dict(values.get(model_id, {}) or {})
+    meta = dict(meta_map.get(model_id, {}) or {})
+    required = list(meta.get("required_fields", []) or [])
+    missing = []
+    for f in required:
+        val = data.get(f)
+        if f not in data or val is None or (isinstance(val, str) and not val.strip()):
+            missing.append(f)
+    return {
+        "model_id": model_id,
+        "description": meta.get("description", ""),
+        "data": data,
+        "required_fields": required,
+        "missing_required": missing,
+        "status": "complete" if not missing else "partial",
+        "updated_at": updated.get(model_id),
+    }
+
+
+@tool
+def upsert_data_model(
+    model_id: str,
+    payload: Dict[str, Any],
+    merge: bool = True,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Strictly validate and persist one data model instance.
+    """
+    return _apply_data_model_upsert(
+        model_id=model_id,
+        payload=dict(payload or {}),
+        merge=bool(merge),
+        state=state,
+    )
+
+
+@tool
+def request_data_model_fields(
+    model_id: str,
+    fields: Optional[List[str]] = None,
+    reason: str = "clarification",
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Request model fields from user via schema-driven interrupt form, then upsert on success.
+    """
+    try:
+        runtime, model_map, meta_map, info = _resolve_data_model_registry(state)
+    except Exception as e:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="registry_error",
+            error=f"Failed to resolve data model registry: {e}",
+        )
+    if model_id not in model_map:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="unknown_model",
+            error=f"Unknown data model '{model_id}'.",
+            available_models=sorted(model_map.keys()),
+            profile_id=info.get("profile_id"),
+            config_path=info.get("cfg_path"),
+        )
+
+    model_meta = dict(meta_map.get(model_id, {}) or {})
+    values = dict((runtime.get("data_model_values", {}) or {}).get(model_id, {}) or {})
+    req_fields = list(fields or [])
+    if not req_fields:
+        required = list(model_meta.get("required_fields", []) or [])
+        missing = []
+        for f in required:
+            val = values.get(f)
+            if f not in values or val is None or (isinstance(val, str) and not val.strip()):
+                missing.append(f)
+        req_fields = missing or required or [f.get("name") for f in list(model_meta.get("fields", []) or [])[:3]]
+
+    field_schema = select_form_fields(model_meta, req_fields)
+    if not field_schema:
+        return _data_model_error_payload(
+            model_id=model_id,
+            status="no_matching_fields",
+            error=f"No matching form fields for model '{model_id}'.",
+            available_models=sorted(model_map.keys()),
+            profile_id=info.get("profile_id"),
+            config_path=info.get("cfg_path"),
+        )
+
+    answer = interrupt(
+        {
+            "type": "model_form",
+            "reason": reason,
+            "question": f"Please provide values for model '{model_id}'.",
+            "context": model_meta.get("description", ""),
+            "model_id": model_id,
+            "fields": [f.get("name") for f in field_schema],
+            "field_schema": field_schema,
+            "default": None,
+        }
+    )
+
+    incoming: Dict[str, Any] = {}
+    if isinstance(answer, dict):
+        if isinstance(answer.get("values"), dict):
+            incoming = dict(answer.get("values") or {})
+        else:
+            incoming = dict(answer)
+    elif len(field_schema) == 1:
+        incoming = {str(field_schema[0].get("name")): answer}
+    else:
+        return {
+            "__tool": "data_model_field_response",
+            "model_id": model_id,
+            "status": "invalid",
+            "error": "Expected object response for multi-field model form.",
+            "raw_answer": answer,
+        }
+
+    return _apply_data_model_upsert(
+        model_id=model_id,
+        payload=incoming,
+        merge=True,
+        state=state,
+    )
+
+
+@tool
+def get_user_profile(
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Convenience wrapper for get_data_model(user_profile).
+    """
+    return get_data_model.func("user_profile", state=state)
+
+
+@tool
+def upsert_user_profile(
+    name: Optional[str] = None,
+    birth_details: Optional[str] = None,
+    place: Optional[str] = None,
+    merge: bool = True,
+    state: Annotated[Optional[Dict[str, Any]], InjectedState] = None,
+) -> Dict[str, Any]:
+    """
+    Convenience wrapper for upsert_data_model(user_profile, ...).
+    """
+    payload: Dict[str, Any] = {}
+    if name is not None:
+        payload["name"] = name
+    if birth_details is not None:
+        payload["birth_details"] = birth_details
+    if place is not None:
+        payload["place"] = place
+    if not payload:
+        return {
+            "__tool": "user_profile_upsert",
+            "model_id": "user_profile",
+            "status": "noop",
+            "message": "No profile fields provided.",
+        }
+    out = _apply_data_model_upsert(
+        model_id="user_profile",
+        payload=payload,
+        merge=bool(merge),
+        state=state,
+    )
+    if out.get("__tool") == "data_model_upsert":
+        out["__tool"] = "user_profile_upsert"
+    return out
+
+
+@tool
 def spawn_subagents(
     tasks: List[SubAgentTask],
     execution: Optional[SubAgentExecutionConfig] = None,
@@ -624,6 +1006,52 @@ def load_skill(
     raise FileNotFoundError(f"Skill not found: {skill_name}.{suffix}")
 
 
+def _load_latest_plan_text(*, max_chars: int = 8_000) -> str:
+    """Best-effort loader for the latest plan markdown under artifacts."""
+    candidates: List[Path] = []
+    direct = _ARTIFACTS_ROOT / "plan.md"
+    if direct.exists() and direct.is_file():
+        candidates.append(direct)
+    if _ARTIFACTS_ROOT.exists():
+        for p in _ARTIFACTS_ROOT.rglob("*.md"):
+            if "plan" in p.name.lower() and p.is_file():
+                candidates.append(p)
+    if not candidates:
+        return ""
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        text = latest.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    text = text.strip()
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n...[truncated]..."
+    return text
+
+
+def _compose_verify_context(request: VerifyRequest, state: Optional[Dict[str, Any]]) -> str:
+    """Enrich verification context with exact plan + concise summary for user-facing clarifications."""
+    base_context = str(request.context or "").strip()
+    state_obj = state or {}
+    memory = dict(state_obj.get("memory", {}) or {})
+    summary = str(memory.get("summary", "") or "").strip()
+    plan = str(memory.get("plan", "") or "").strip()
+    if not plan:
+        plan = _load_latest_plan_text()
+
+    if request.reason not in {"plan_created", "plan_changed", "clarification"}:
+        return base_context
+
+    sections: List[str] = []
+    if plan:
+        sections.append("Exact current plan:\n" + plan[:8_000])
+    if summary:
+        sections.append("Conversation summary:\n" + summary[:1_800])
+    if base_context:
+        sections.append("Additional context:\n" + base_context[:2_000])
+    return "\n\n".join(sections).strip()
+
+
 @tool
 def verify_with_user(
     request: VerifyRequest,
@@ -640,18 +1068,20 @@ def verify_with_user(
     - You are about to perform a risky/irreversible action.
 
     IMPORTANT:
-    - Provide a short context (plan snippet) to help user decide quickly.
+    - Provide exact current plan text plus a concise summary for approvals/clarifications.
     - Ask ONE precise question.
     """
     if bool((state or {}).get("runtime", {}).get("disable_hitl", False)):
         raise ValueError("verify_with_user is disabled in worker sub-agent flows. Escalate to supervisor instead.")
+
+    context_text = _compose_verify_context(request, state)
 
     answer = interrupt({
         "type": request.kind,
         "reason": request.reason,
         "question": request.question,
         "choices": request.choices,
-        "context": request.context,
+        "context": context_text,
         "default": request.default,
     })
 
@@ -664,6 +1094,12 @@ def verify_with_user(
 
 DEFAULT_TOOLS = [
     load_skill,
+    list_data_models,
+    get_data_model,
+    upsert_data_model,
+    request_data_model_fields,
+    get_user_profile,
+    upsert_user_profile,
     read_file,
     read_file_range,
     write_file,
